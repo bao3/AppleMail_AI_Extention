@@ -57,6 +57,13 @@ security add-generic-password \
 
 defaults write com.bao3.AppleMailAI com.bao3.AppleMailAI.vertexProjectID -string "$PROJECT_ID"
 defaults write com.bao3.AppleMailAI.Extension com.bao3.AppleMailAI.vertexProjectID -string "$PROJECT_ID"
+for group_dir in "$HOME/Library/Group Containers/"*".com.bao3.AppleMailAI"; do
+  if [[ -d "$group_dir" ]]; then
+    group_id="$(basename "$group_dir")"
+    mkdir -p "$group_dir/Library/Preferences"
+    defaults write "$group_dir/Library/Preferences/$group_id.plist" com.bao3.AppleMailAI.vertexProjectID -string "$PROJECT_ID"
+  fi
+done
 
 unset KEY_VALUE
 echo "Synced Vertex AI API Key into macOS Login Keychain (service=$SERVICE, account=$ACCOUNT, project=$PROJECT_ID)."

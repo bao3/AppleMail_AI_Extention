@@ -17,9 +17,18 @@ public final class AnalysisCacheStore: @unchecked Sendable {
     private var cachedHeadlinesByKey: [String: String] = [:]
 
     public init(baseDirectory: URL? = nil, warmHeadlinesAsync: Bool = false) {
-        let root = baseDirectory
-            ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
+        let root: URL
+        if let baseDirectory {
+            root = baseDirectory
+        } else {
+            let sharedRoot = SharedAppGroup.sharedApplicationSupportURL
+            if SharedAppGroup.containerURL != nil,
+               let legacyRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            {
+                SharedAppGroup.migrateLegacyCacheDirectoryIfNeeded(from: legacyRoot, to: sharedRoot)
+            }
+            root = sharedRoot
+        }
 
         self.cacheDirectory = root
             .appendingPathComponent("AppleMailAI", isDirectory: true)

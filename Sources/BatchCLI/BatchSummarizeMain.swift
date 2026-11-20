@@ -236,7 +236,11 @@ struct BatchSummarizeMain {
         logLine("   来源分布: \(formatCounts(mailboxDist))")
         logLine("   过滤跳过统计: \(formatCounts(skipStats))")
 
-        // (C) Summarize concurrently with Magpie and persist into Extension + HostApp caches
+        // (C) Summarize concurrently with Magpie and persist into shared App Group + Extension + HostApp caches
+        let groupAppSupportDir = findSharedAppGroupContainer()?
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Application Support", isDirectory: true)
+        let groupCache = groupAppSupportDir.map { AnalysisCacheStore(baseDirectory: $0) }
         let extCache = AnalysisCacheStore(baseDirectory: extensionAppSupportDir)
         let hostCache = AnalysisCacheStore(baseDirectory: hostAppSupportDir)
 
@@ -248,7 +252,12 @@ struct BatchSummarizeMain {
         pending.reserveCapacity(total)
 
         for candidate in candidates {
-            if let existing = extCache.load(forMessageID: candidate.parsed.messageID) {
+            if let existing = groupCache?.load(forMessageID: candidate.parsed.messageID)
+                ?? extCache.load(forMessageID: candidate.parsed.messageID)
+            {
+                if let groupCache, !groupCache.hasCachedAnalysis(forMessageID: candidate.parsed.messageID) {
+                    try? groupCache.save(existing, forMessageID: candidate.parsed.messageID)
+                }
                 if !hostCache.hasCachedAnalysis(forMessageID: candidate.parsed.messageID) {
                     try? hostCache.save(existing, forMessageID: candidate.parsed.messageID)
                 }
@@ -282,7 +291,12 @@ struct BatchSummarizeMain {
                                 apiKey: apiKey,
                                 aiClient: aiClient
                             )
-                            try extCache.save(analysis, forMessageID: candidate.parsed.messageID)
+                            if let groupCache {
+                                try groupCache.save(analysis, forMessageID: candidate.parsed.messageID)
+                                try? extCache.save(analysis, forMessageID: candidate.parsed.messageID)
+                            } else {
+                                try extCache.save(analysis, forMessageID: candidate.parsed.messageID)
+                            }
                             try? hostCache.save(analysis, forMessageID: candidate.parsed.messageID)
 
                             let entry = makeResultEntry(candidate: candidate, analysis: analysis, wasAlreadyCached: false)
@@ -365,12 +379,53 @@ struct BatchSummarizeMain {
 
     // MARK: - (A) Magpie Config & Keychain
 
+    private static func findSharedAppGroupContainer() -> URL? {
+        let groupContainersDir = URL(
+            fileURLWithPath: "\(NSHomeDirectory())/Library/Group Containers",
+            isDirectory: true
+        )
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: groupContainersDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        return entries.first { url in
+            url.lastPathComponent.hasSuffix(".\(SharedAppGroup.groupSuffix)")
+        }
+    }
+
     private static func loadAndValidateMagpieConfig() throws -> (AIProviderProfile, String) {
-        let plistURL = URL(fileURLWithPath: extensionPlistPath)
+        var candidatePlists: [String] = []
+        if let groupURL = findSharedAppGroupContainer() {
+            let groupID = groupURL.lastPathComponent
+            let groupPlist = groupURL
+                .appendingPathComponent("Library", isDirectory: true)
+                .appendingPathComponent("Preferences", isDirectory: true)
+                .appendingPathComponent("\(groupID).plist", isDirectory: false)
+                .path
+            candidatePlists.append(groupPlist)
+        }
+        candidatePlists.append(extensionPlistPath)
+
+        var lastError: Error?
+        for plistPath in candidatePlists {
+            do {
+                return try loadAndValidateMagpieConfig(fromPlistAt: plistPath)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? BatchCLIError.missingConfigPlist(extensionPlistPath)
+    }
+
+    private static func loadAndValidateMagpieConfig(fromPlistAt plistPath: String) throws -> (AIProviderProfile, String) {
+        let plistURL = URL(fileURLWithPath: plistPath)
         guard FileManager.default.fileExists(atPath: plistURL.path),
               let dict = NSDictionary(contentsOf: plistURL) as? [String: Any]
         else {
-            throw BatchCLIError.missingConfigPlist(extensionPlistPath)
+            throw BatchCLIError.missingConfigPlist(plistPath)
         }
 
         guard let profilesData = dict[AIProviderStore.profilesDefaultsKey] as? Data,

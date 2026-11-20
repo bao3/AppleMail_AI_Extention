@@ -161,6 +161,7 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
     // MARK: - Helpers
 
     private nonisolated func hasConfiguredCredentials() -> Bool {
+        AIProviderStore.shared.reload()
         let profile = AIProviderStore.shared.activeProfile
         guard KeychainStore.shared.hasAPIKey(forProfileID: profile.id) else { return false }
         if profile.kind.requiresProjectID {

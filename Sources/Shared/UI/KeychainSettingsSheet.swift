@@ -2,6 +2,11 @@ import SwiftUI
 
 @MainActor
 final class KeychainSettingsViewModel: ObservableObject {
+    enum ConnectionTestResult: Equatable {
+        case available(tier: AIModelTier, detail: String)
+        case unavailable(tier: AIModelTier, detail: String)
+    }
+
     @Published var profiles: [AIProviderProfile] = []
     @Published var activeProfileID: String = AIProviderProfile.defaultVertexProfileID
     @Published var editingProfile: AIProviderProfile = AIProviderProfile.defaultVertexProfile()
@@ -13,9 +18,16 @@ final class KeychainSettingsViewModel: ObservableObject {
 
     @Published var autoAnalyzeMoxaPrimary: Bool
     @Published var autoFlagMoxaPrimary: Bool
-    @Published var isTestingConnection = false
+    @Published var testingTier: AIModelTier?
+    @Published var isFetchingModels = false
+    @Published var fetchedModels: [String] = []
+    @Published var connectionTestResult: ConnectionTestResult?
     @Published var statusMessage: String?
     @Published var isErrorStatus = false
+
+    var isTestingConnection: Bool {
+        testingTier != nil
+    }
 
     private let keychain: KeychainStore
     private let providerStore: AIProviderStore
@@ -45,12 +57,15 @@ final class KeychainSettingsViewModel: ObservableObject {
     }
 
     func refreshState() {
+        providerStore.reload()
         profiles = providerStore.profiles
         let active = providerStore.activeProfile
         if activeProfileID != active.id || !profiles.contains(where: { $0.id == editingProfile.id }) {
             activeProfileID = active.id
             editingProfile = active
             apiKeyInput = ""
+            fetchedModels = []
+            connectionTestResult = nil
         }
         selectedTier = providerStore.preferredTier
         maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: editingProfile.id)
@@ -65,6 +80,8 @@ final class KeychainSettingsViewModel: ObservableObject {
         editingProfile = providerStore.profile(forID: profile.id) ?? profile
         apiKeyInput = ""
         maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: editingProfile.id)
+        fetchedModels = []
+        connectionTestResult = nil
         statusMessage = nil
         isErrorStatus = false
     }
@@ -85,6 +102,8 @@ final class KeychainSettingsViewModel: ObservableObject {
         editingProfile = newProfile
         apiKeyInput = ""
         maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: newProfile.id)
+        fetchedModels = []
+        connectionTestResult = nil
         statusMessage = "已添加并启用「\(newProfile.name)」，请配置凭据后保存。"
         isErrorStatus = false
     }
@@ -101,6 +120,8 @@ final class KeychainSettingsViewModel: ObservableObject {
         editingProfile = newProfile
         apiKeyInput = ""
         maskedKeyStatus = nil
+        fetchedModels = []
+        connectionTestResult = nil
         statusMessage = "已创建自定义配置「\(newProfile.name)」。"
         isErrorStatus = false
     }
@@ -121,6 +142,8 @@ final class KeychainSettingsViewModel: ObservableObject {
         editingProfile = nextActive
         apiKeyInput = ""
         maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: nextActive.id)
+        fetchedModels = []
+        connectionTestResult = nil
         statusMessage = "已删除配置「\(targetName)」，当前切换为「\(nextActive.name)」。"
         isErrorStatus = false
     }
@@ -129,6 +152,8 @@ final class KeychainSettingsViewModel: ObservableObject {
         let oldKind = editingProfile.kind
         guard oldKind != newKind else { return }
         editingProfile.kind = newKind
+        fetchedModels = []
+        connectionTestResult = nil
         if editingProfile.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || editingProfile.baseURL == oldKind.defaultBaseURL
         {
@@ -170,15 +195,18 @@ final class KeychainSettingsViewModel: ObservableObject {
         }
 
         providerStore.upsertProfile(editingProfile, makeActive: true)
+        providerStore.setPreferredTier(selectedTier)
         profiles = providerStore.profiles
         activeProfileID = editingProfile.id
 
         let candidateKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        var didSaveKey = false
         if !candidateKey.isEmpty {
             do {
                 try keychain.saveAPIKey(candidateKey, forProfileID: editingProfile.id)
                 apiKeyInput = ""
                 maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: editingProfile.id)
+                didSaveKey = true
             } catch {
                 statusMessage = error.localizedDescription
                 isErrorStatus = true
@@ -186,42 +214,11 @@ final class KeychainSettingsViewModel: ObservableObject {
             }
         }
 
-        statusMessage = "已保存并启用「\(editingProfile.name)」。"
+        statusMessage = didSaveKey
+            ? "已保存并启用「\(editingProfile.name)」（API Key 已写入 Keychain）。"
+            : "已保存并启用「\(editingProfile.name)」。"
         isErrorStatus = false
         return true
-    }
-
-    func saveKey() -> Bool {
-        let trimmed = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            statusMessage = "请先粘贴有效的 API Key。"
-            isErrorStatus = true
-            return false
-        }
-
-        do {
-            try keychain.saveAPIKey(trimmed, forProfileID: editingProfile.id)
-            apiKeyInput = ""
-            maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: editingProfile.id)
-
-            // Also persist any pending profile edits (e.g. Project ID / Base URL)
-            if !editingProfile.kind.requiresProjectID
-                || !editingProfile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                providerStore.upsertProfile(editingProfile, makeActive: true)
-                profiles = providerStore.profiles
-                activeProfileID = editingProfile.id
-            }
-
-            let account = KeychainStore.accountName(forProfileID: editingProfile.id)
-            statusMessage = "已安全写入 macOS Keychain（\(account)）。"
-            isErrorStatus = false
-            return true
-        } catch {
-            statusMessage = error.localizedDescription
-            isErrorStatus = true
-            return false
-        }
     }
 
     func deleteKey() {
@@ -266,30 +263,77 @@ final class KeychainSettingsViewModel: ObservableObject {
         ExtensionOpsConfig.setAutoFlagMoxaPrimaryEnabled(enabled)
     }
 
-    func testConnection(tier: AIModelTier) async {
-        let candidateKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let activeKey = candidateKey.isEmpty
-            ? keychain.loadAPIKey(forProfileID: editingProfile.id)
-            : candidateKey
+    var fallbackModelSuggestions: [String] {
+        var candidates: [String] = [
+            editingProfile.fastModel,
+            editingProfile.deepModel,
+            editingProfile.kind.defaultFastModel,
+            editingProfile.kind.defaultDeepModel
+        ]
+        switch editingProfile.kind {
+        case .vertexAI, .geminiDeveloper:
+            candidates.append(contentsOf: GeminiModel.allCases.map(\.rawValue))
+            candidates.append(contentsOf: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.8-flash", "gemini-4-carbon", "gemini-4-hydrogen"])
+        case .openAICompatible:
+            candidates.append(contentsOf: AIProviderProfile.builtInPresets
+                .filter { $0.kind == .openAICompatible }
+                .flatMap { [$0.fastModel, $0.deepModel] })
+        case .anthropic:
+            candidates.append(contentsOf: ["claude-3-5-haiku-latest", "claude-sonnet-4-20250514", "claude-3-7-sonnet-latest"])
+        }
+        var seen = Set<String>()
+        return candidates
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 
-        guard let activeKey, !activeKey.isEmpty else {
-            statusMessage = "未找到 API Key，请先输入或保存到 Keychain。"
+    func fetchModels() async {
+        let activeKey: String
+        switch resolveCredentials(missingKeyMessage: "未找到 API Key，请先输入或保存 API Key 后再获取模型。") {
+        case let .success(key):
+            activeKey = key
+        case let .failure(message):
+            statusMessage = message
             isErrorStatus = true
             return
         }
 
-        if editingProfile.kind.requiresProjectID,
-           editingProfile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            statusMessage = "请先填写 Vertex AI 的 GCP Project ID。"
-            isErrorStatus = true
-            return
-        }
-
-        isTestingConnection = true
+        isFetchingModels = true
         statusMessage = nil
         isErrorStatus = false
-        defer { isTestingConnection = false }
+        defer { isFetchingModels = false }
+
+        do {
+            let models = try await aiClient.fetchAvailableModels(
+                profile: editingProfile,
+                apiKey: activeKey
+            )
+            fetchedModels = models
+            statusMessage = "已获取 \(models.count) 个可用模型，可在下拉框中选择。"
+            isErrorStatus = false
+        } catch {
+            statusMessage = "❌ 获取模型失败：\(error.localizedDescription)"
+            isErrorStatus = true
+        }
+    }
+
+    func testConnection(tier: AIModelTier) async {
+        let activeKey: String
+        switch resolveCredentials(missingKeyMessage: "未找到 API Key，请先输入 API Key 并点击「保存配置」。") {
+        case let .success(key):
+            activeKey = key
+        case let .failure(message):
+            connectionTestResult = .unavailable(tier: tier, detail: message)
+            statusMessage = message
+            isErrorStatus = true
+            return
+        }
+
+        testingTier = tier
+        connectionTestResult = nil
+        statusMessage = nil
+        isErrorStatus = false
+        defer { testingTier = nil }
 
         do {
             let resultMessage = try await aiClient.verifyConnection(
@@ -297,12 +341,36 @@ final class KeychainSettingsViewModel: ObservableObject {
                 apiKey: activeKey,
                 tier: tier
             )
+            connectionTestResult = .available(tier: tier, detail: resultMessage)
             statusMessage = "✅ \(resultMessage)"
             isErrorStatus = false
         } catch {
+            connectionTestResult = .unavailable(tier: tier, detail: error.localizedDescription)
             statusMessage = "❌ \(error.localizedDescription)"
             isErrorStatus = true
         }
+    }
+
+    private enum CredentialResolution {
+        case success(String)
+        case failure(String)
+    }
+
+    private func resolveCredentials(missingKeyMessage: String) -> CredentialResolution {
+        let candidateKey = apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeKey = candidateKey.isEmpty
+            ? keychain.loadAPIKey(forProfileID: editingProfile.id)
+            : candidateKey
+
+        guard let activeKey, !activeKey.isEmpty else {
+            return .failure(missingKeyMessage)
+        }
+        if editingProfile.kind.requiresProjectID,
+           editingProfile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return .failure("请先填写 Vertex AI 的 GCP Project ID。")
+        }
+        return .success(activeKey)
     }
 
     var editingProfileHasCompleteCredentials: Bool {
@@ -325,6 +393,8 @@ public struct KeychainSettingsSheet: View {
         self.onSavedKey = onSavedKey
         self.onClose = onClose
     }
+
+    private let actionColumnWidth: CGFloat = 84
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -353,8 +423,6 @@ public struct KeychainSettingsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     providerManagementSection
-                    credentialsSection
-                    modelTierAndTestSection
                     workspaceBookmarkSection
                     automationSection
 
@@ -425,20 +493,44 @@ public struct KeychainSettingsSheet: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 58, alignment: .leading)
 
-                    Picker("当前服务商", selection: Binding(
-                        get: { vm.activeProfileID },
-                        set: { id in
-                            if let profile = vm.profiles.first(where: { $0.id == id }) {
+                    let selectedProfile = vm.profiles.first(where: { $0.id == vm.activeProfileID }) ?? vm.editingProfile
+                    Menu {
+                        ForEach(vm.profiles) { profile in
+                            Button {
                                 vm.selectProfile(profile)
+                            } label: {
+                                HStack {
+                                    Text("\(profile.name) · \(profile.kind.displayName)")
+                                    if profile.id == vm.activeProfileID {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
                             }
                         }
-                    )) {
-                        ForEach(vm.profiles) { profile in
-                            Text("\(profile.name) · \(profile.kind.displayName)").tag(profile.id)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text("\(selectedProfile.name) · \(selectedProfile.kind.displayName)")
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(.secondary)
                         }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .stroke(Color(nsColor: .separatorColor).opacity(0.65), lineWidth: 0.75)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                     }
-                    .labelsHidden()
-                    .controlSize(.small)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+
+                    Spacer(minLength: 0)
                 }
 
                 Divider().opacity(0.45)
@@ -460,13 +552,71 @@ public struct KeychainSettingsSheet: View {
                     }
                     .labelsHidden()
                     .controlSize(.small)
+                    .fixedSize()
+                    Spacer(minLength: 0)
                 }
 
                 fieldRow(label: "Base URL") {
-                    TextField(vm.editingProfile.kind.defaultBaseURL, text: $vm.editingProfile.baseURL)
-                        .textFieldStyle(.roundedBorder)
+                    HStack(spacing: 6) {
+                        TextField(vm.editingProfile.kind.defaultBaseURL, text: $vm.editingProfile.baseURL)
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+                            .font(.system(size: 11.5, design: .monospaced))
+
+                        Button {
+                            Task { await vm.fetchModels() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                if vm.isFetchingModels {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Text(vm.isFetchingModels ? "获取中" : "获取模型")
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
                         .controlSize(.small)
-                        .font(.system(size: 11.5, design: .monospaced))
+                        .frame(width: actionColumnWidth)
+                        .disabled(vm.isFetchingModels)
+                    }
+                }
+
+                HStack(alignment: .top, spacing: 8) {
+                    Text("API Key")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 58, alignment: .leading)
+                        .padding(.top, 4)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            SecureField(
+                                vm.maskedKeyStatus ?? "粘贴或更新「\(vm.editingProfile.name)」API Key",
+                                text: $vm.apiKeyInput
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .controlSize(.small)
+
+                            if vm.maskedKeyStatus != nil {
+                                Button("清除 Key", role: .destructive) {
+                                    vm.deleteKey()
+                                }
+                                .controlSize(.small)
+                                .frame(width: actionColumnWidth)
+                            } else {
+                                Text("未配置")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                    .frame(width: actionColumnWidth, alignment: .center)
+                            }
+                        }
+
+                        if let status = vm.maskedKeyStatus {
+                            Label(status, systemImage: "checkmark.shield.fill")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.green)
+                                .lineLimit(1)
+                        }
+                    }
                 }
 
                 if vm.editingProfile.kind.requiresProjectID {
@@ -486,21 +636,71 @@ public struct KeychainSettingsSheet: View {
                 }
 
                 fieldRow(label: "极速模型") {
-                    TextField(vm.editingProfile.kind.defaultFastModel, text: $vm.editingProfile.fastModel)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.small)
-                        .font(.system(size: 11.5, design: .monospaced))
+                    HStack(spacing: 6) {
+                        modelComboField(
+                            placeholder: vm.editingProfile.kind.defaultFastModel,
+                            text: $vm.editingProfile.fastModel
+                        )
+                        defaultTierButton(for: .fast)
+                    }
                 }
 
                 fieldRow(label: "深度模型") {
-                    TextField(vm.editingProfile.kind.defaultDeepModel, text: $vm.editingProfile.deepModel)
-                        .textFieldStyle(.roundedBorder)
-                        .controlSize(.small)
-                        .font(.system(size: 11.5, design: .monospaced))
+                    HStack(spacing: 6) {
+                        modelComboField(
+                            placeholder: vm.editingProfile.kind.defaultDeepModel,
+                            text: $vm.editingProfile.deepModel
+                        )
+                        defaultTierButton(for: .deep)
+                    }
                 }
 
-                HStack {
-                    Spacer()
+                HStack(spacing: 6) {
+                    Button {
+                        Task { await vm.testConnection(tier: .fast) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if vm.testingTier == .fast {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text("测试极速")
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(vm.isTestingConnection)
+
+                    Button {
+                        Task { await vm.testConnection(tier: .deep) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if vm.testingTier == .deep {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text("测试深度")
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(vm.isTestingConnection)
+
+                    if let testResult = vm.connectionTestResult {
+                        switch testResult {
+                        case let .available(tier, detail):
+                            Label("\(tier.displayName)可用", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.green)
+                                .lineLimit(1)
+                                .help(detail)
+                        case let .unavailable(tier, detail):
+                            Label("\(tier.displayName)不可用", systemImage: "xmark.circle.fill")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.red)
+                                .lineLimit(1)
+                                .help(detail)
+                        }
+                    }
+
+                    Spacer(minLength: 4)
+
                     Button("保存配置") {
                         if vm.saveProfileConfiguration(), vm.editingProfileHasCompleteCredentials {
                             onSavedKey?()
@@ -509,92 +709,87 @@ public struct KeychainSettingsSheet: View {
                     .controlSize(.small)
                     .buttonStyle(.borderedProminent)
                 }
+                .padding(.top, 4)
             }
         }
     }
 
-    private var credentialsSection: some View {
-        MailSectionContainer(title: "API Key 凭据（\(vm.editingProfile.name)）", systemImage: "key") {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    Text("Keychain 状态：")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(.secondary)
-                    if let status = vm.maskedKeyStatus {
-                        Label(status, systemImage: "checkmark.shield.fill")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.green)
-                    } else {
-                        Label("未配置 API Key", systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(.orange)
-                    }
-                }
+    private func modelComboField(placeholder: String, text: Binding<String>) -> some View {
+        HStack(spacing: 0) {
+            TextField(placeholder, text: text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .padding(.leading, 7)
+                .padding(.vertical, 4)
 
-                SecureField("粘贴或更新「\(vm.editingProfile.name)」API Key", text: $vm.apiKeyInput)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-
-                HStack(spacing: 8) {
-                    Button("保存到 Keychain") {
-                        if vm.saveKey(), vm.editingProfileHasCompleteCredentials {
-                            onSavedKey?()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(vm.apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                    if vm.maskedKeyStatus != nil {
-                        Button("清除 Key", role: .destructive) {
-                            vm.deleteKey()
-                        }
-                        .controlSize(.small)
-                    }
-
-                    Spacer()
-                }
-            }
-        }
-    }
-
-    private var modelTierAndTestSection: some View {
-        MailSectionContainer(title: "默认模型档位与连通性校验", systemImage: "cpu") {
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("默认档位", selection: Binding(
-                    get: { vm.selectedTier },
-                    set: { vm.updatePreferredTier($0) }
-                )) {
-                    ForEach(AIModelTier.allCases) { tier in
-                        Text("\(tier.displayName) (\(vm.editingProfile.modelName(for: tier)))").tag(tier)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-
-                HStack(spacing: 8) {
-                    Button {
-                        Task { await vm.testConnection(tier: .fast) }
-                    } label: {
-                        HStack(spacing: 4) {
-                            if vm.isTestingConnection {
-                                ProgressView().controlSize(.small)
+            Menu {
+                if !vm.fetchedModels.isEmpty {
+                    ForEach(vm.fetchedModels, id: \.self) { modelID in
+                        Button {
+                            text.wrappedValue = modelID
+                        } label: {
+                            HStack {
+                                Text(modelID)
+                                if text.wrappedValue == modelID {
+                                    Image(systemName: "checkmark")
+                                }
                             }
-                            Text("测试连通性（极速）")
                         }
                     }
-                    .controlSize(.small)
-                    .disabled(vm.isTestingConnection)
-
-                    Button("测试深度模型") {
-                        Task { await vm.testConnection(tier: .deep) }
+                } else {
+                    Text("点击「获取模型」拉取在线列表")
+                    Divider()
+                    ForEach(vm.fallbackModelSuggestions, id: \.self) { modelID in
+                        Button {
+                            text.wrappedValue = modelID
+                        } label: {
+                            HStack {
+                                Text(modelID)
+                                if text.wrappedValue == modelID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
                     }
-                    .controlSize(.small)
-                    .disabled(vm.isTestingConnection)
-
-                    Spacer()
                 }
+            } label: {
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.75), lineWidth: 0.75)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func defaultTierButton(for tier: AIModelTier) -> some View {
+        if vm.selectedTier == tier {
+            Label("已默认", systemImage: "checkmark")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.green)
+                .frame(width: actionColumnWidth, height: 22)
+                .background(Color.green.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(Color.green.opacity(0.35), lineWidth: 0.75)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        } else {
+            Button("设为默认") {
+                vm.updatePreferredTier(tier)
+            }
+            .controlSize(.small)
+            .frame(width: actionColumnWidth)
         }
     }
 

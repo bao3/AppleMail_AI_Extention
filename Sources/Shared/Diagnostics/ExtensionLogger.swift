@@ -18,7 +18,7 @@ public enum ExtensionLogger {
     public static let reminders = Logger(subsystem: subsystem, category: "reminders")
 }
 
-/// Ops kill-switch flags readable via `UserDefaults.standard` (e.g., `defaults write com.bao3.AppleMailAI.Extension ...`).
+/// Ops kill-switch flags readable via shared App Group `UserDefaults` (falling back to `.standard` outside signed app/extension).
 public enum ExtensionOpsConfig {
     /// Set to `true` to disable `MEMessageSecurityHandler` banner injection while keeping `MEComposeSessionHandler` active.
     public static let disableSecurityBannerKey = "com.bao3.AppleMailAI.disableSecurityBanner"
@@ -27,29 +27,35 @@ public enum ExtensionOpsConfig {
     /// Toggle for automatic 7-color Mail flag assignment after Moxa Primary background analysis (defaults to `true`).
     public static let autoFlagMoxaPrimaryKey = "com.bao3.AppleMailAI.autoFlagMoxaPrimary"
 
+    private static var defaults: UserDefaults {
+        SharedAppGroup.sharedUserDefaults
+    }
+
     public static var isSecurityBannerDisabled: Bool {
-        UserDefaults.standard.bool(forKey: disableSecurityBannerKey)
+        defaults.bool(forKey: disableSecurityBannerKey)
     }
 
     public static var isAutoAnalyzeMoxaPrimaryEnabled: Bool {
-        if UserDefaults.standard.object(forKey: autoAnalyzeMoxaPrimaryKey) == nil {
+        if defaults.object(forKey: autoAnalyzeMoxaPrimaryKey) == nil {
             return true
         }
-        return UserDefaults.standard.bool(forKey: autoAnalyzeMoxaPrimaryKey)
+        return defaults.bool(forKey: autoAnalyzeMoxaPrimaryKey)
     }
 
     public static func setAutoAnalyzeMoxaPrimaryEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: autoAnalyzeMoxaPrimaryKey)
+        defaults.set(enabled, forKey: autoAnalyzeMoxaPrimaryKey)
+        SharedAppGroup.postDistributedConfigDidChange()
     }
 
     public static var isAutoFlagMoxaPrimaryEnabled: Bool {
-        if UserDefaults.standard.object(forKey: autoFlagMoxaPrimaryKey) == nil {
+        if defaults.object(forKey: autoFlagMoxaPrimaryKey) == nil {
             return true
         }
-        return UserDefaults.standard.bool(forKey: autoFlagMoxaPrimaryKey)
+        return defaults.bool(forKey: autoFlagMoxaPrimaryKey)
     }
 
     public static func setAutoFlagMoxaPrimaryEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: autoFlagMoxaPrimaryKey)
+        defaults.set(enabled, forKey: autoFlagMoxaPrimaryKey)
+        SharedAppGroup.postDistributedConfigDidChange()
     }
 }

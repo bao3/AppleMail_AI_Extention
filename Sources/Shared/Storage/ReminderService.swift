@@ -217,8 +217,8 @@ public enum ReminderScheduleCalculator {
 public final class ReminderService {
     public static let shared = ReminderService()
     public static let reminderListTitle = "Moxa 邮件待办"
-    private static let addedKeysDefaultsKey = "com.bao3.AppleMailAI.addedReminderKeys"
-    private static let maxStoredAddedKeys = 500
+    nonisolated public static let addedKeysDefaultsKey = "com.bao3.AppleMailAI.addedReminderKeys"
+    nonisolated public static let maxStoredAddedKeys = 500
 
     private let eventStore = EKEventStore()
 
@@ -241,7 +241,7 @@ public final class ReminderService {
         if list.count > Self.maxStoredAddedKeys {
             list.removeFirst(list.count - Self.maxStoredAddedKeys)
         }
-        UserDefaults.standard.set(list, forKey: Self.addedKeysDefaultsKey)
+        SharedAppGroup.sharedUserDefaults.set(list, forKey: Self.addedKeysDefaultsKey)
     }
 
     public static func mailMessageURL(forMessageID rawMessageID: String) -> URL? {
@@ -345,7 +345,7 @@ public final class ReminderService {
     // MARK: - Private
 
     private func storedKeysList() -> [String] {
-        UserDefaults.standard.stringArray(forKey: Self.addedKeysDefaultsKey) ?? []
+        SharedAppGroup.sharedUserDefaults.stringArray(forKey: Self.addedKeysDefaultsKey) ?? []
     }
 
     private func resolveTargetReminderList() -> EKCalendar? {

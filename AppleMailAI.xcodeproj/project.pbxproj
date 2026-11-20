@@ -36,6 +36,7 @@
 		29B4EFB604049324AA23FD8E /* ComposeAssistantViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 439B84B6323D150BCCED1769 /* ComposeAssistantViewController.swift */; };
 		2B4C239ACB127CE9A1293D88 /* HistoricalPriceLookupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A74B72EA94F0F02AF546FC1F /* HistoricalPriceLookupService.swift */; };
 		2BC170C4EDB29A1A994B75A4 /* ExtensionAssets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DA838F4AF5B7AF56DF4EC2EC /* ExtensionAssets.xcassets */; };
+		2E8F73BE9FCA289A629BDD99 /* SharedAppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A157D6C01AB2A28A0FF4345F /* SharedAppGroup.swift */; };
 		2FFB1C4754BEFE9FF566CF1A /* AttachmentOrganizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 819E44030C281C7E32AE8AAB /* AttachmentOrganizerTests.swift */; };
 		3047A313DF2047CAFB7F90A2 /* RawEmailDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11B769FA86BF3A4467CBA152 /* RawEmailDataStore.swift */; };
 		33559067ECB40AF007196546 /* HistoricalEmailDetailSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 636E553C73718BD8648F2B39 /* HistoricalEmailDetailSheet.swift */; };
@@ -128,6 +129,7 @@
 		B85C69CAFB70C333174C0CE6 /* GeminiModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E1B77F3113DE84160DF0981 /* GeminiModel.swift */; };
 		B908D1B57B83BF971B5CDBC1 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A77B059A342BC57A1517E926 /* libsqlite3.tbd */; };
 		BA00161BADA1A479889ED527 /* EmailAnalysisPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 655641CB9177F13863410ACD /* EmailAnalysisPanelView.swift */; };
+		C01B0FB29720B9E2A53C0F20 /* SharedAppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A157D6C01AB2A28A0FF4345F /* SharedAppGroup.swift */; };
 		C76C9804740FAFFEC2D423A7 /* RawEmailDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11B769FA86BF3A4467CBA152 /* RawEmailDataStore.swift */; };
 		C934CEF70907491404A4F92F /* ReminderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1DC27F0A3CF3B4872AEF2F /* ReminderService.swift */; };
 		C9B04E8FAE74C55A495A538C /* ReminderService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1DC27F0A3CF3B4872AEF2F /* ReminderService.swift */; };
@@ -139,6 +141,7 @@
 		D23F22DD500E3CAB409B3740 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D373AD72CC1FE56B4BD0C33B /* KeychainStore.swift */; };
 		D2B0D51B64C8C93EC06C8428 /* AttachmentOrganizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F306F9CAEDED5BB7C89351 /* AttachmentOrganizerService.swift */; };
 		D2C8E77A1EF9094735AFD2B2 /* ParsedEmailStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C9F348F3F4B9558FBAC1344 /* ParsedEmailStore.swift */; };
+		D37B1F5C5C6E6F1D98A16097 /* SharedAppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A157D6C01AB2A28A0FF4345F /* SharedAppGroup.swift */; };
 		D6EEA94E1E6DD242B0DEB8FC /* MailAppleStyleComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17BEAAEA3A9F20C625EEE4F2 /* MailAppleStyleComponents.swift */; };
 		D6F0122123509F25D8DD050B /* KeychainSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B4DFCC2BCF5A0CFFCE4A236 /* KeychainSettingsSheet.swift */; };
 		D75CCC7A7F6DD7039D4634D0 /* AnalysisCacheStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A373C0CEAD5263CD7B62F70 /* AnalysisCacheStoreTests.swift */; };
@@ -162,6 +165,7 @@
 		F1148F746DE174E865E20B0F /* VertexGeminiClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B60A86B1272128BBCAB1BA11 /* VertexGeminiClient.swift */; };
 		F1C9B157D88B85113B458E43 /* MailHighlightedText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4CAE52FD0E791DE887AF11 /* MailHighlightedText.swift */; };
 		F73E7E8BACFB56DFB339E8D9 /* AttachmentOrganizerService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F306F9CAEDED5BB7C89351 /* AttachmentOrganizerService.swift */; };
+		F76C25A65BFFBDE919E03DB2 /* SharedAppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A157D6C01AB2A28A0FF4345F /* SharedAppGroup.swift */; };
 		FAADBADFD3F3A3243D2E0E17 /* KeychainSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B4DFCC2BCF5A0CFFCE4A236 /* KeychainSettingsSheet.swift */; };
 		FD4B74A8DC600D85A936E85B /* EmailAIAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5326B3451120A02E7DC4D890 /* EmailAIAnalysis.swift */; };
 		FF71A222FCD3093AD3E04E3E /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C3E8916A647F5E1CA317E7D3 /* Security.framework */; };
@@ -225,6 +229,7 @@
 		8CEA6D6A9AF09558B690000A /* MailAIExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MailAIExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		920F4ACE51E2AFD1B706AB12 /* AIServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIServiceClient.swift; sourceTree = "<group>"; };
 		9AE4DF94743AA7CA2768ACF8 /* ReminderScheduleAndFlagTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReminderScheduleAndFlagTests.swift; sourceTree = "<group>"; };
+		A157D6C01AB2A28A0FF4345F /* SharedAppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedAppGroup.swift; sourceTree = "<group>"; };
 		A1F306F9CAEDED5BB7C89351 /* AttachmentOrganizerService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentOrganizerService.swift; sourceTree = "<group>"; };
 		A27E6AFDD1969C75F49ABEC0 /* AppleMailAIBatch */ = {isa = PBXFileReference; includeInIndex = 0; path = AppleMailAIBatch; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3A97A305223A05DF14E19E5 /* MultiProviderAndStreamingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiProviderAndStreamingTests.swift; sourceTree = "<group>"; };
@@ -335,6 +340,7 @@
 				3C9F348F3F4B9558FBAC1344 /* ParsedEmailStore.swift */,
 				11B769FA86BF3A4467CBA152 /* RawEmailDataStore.swift */,
 				5E1DC27F0A3CF3B4872AEF2F /* ReminderService.swift */,
+				A157D6C01AB2A28A0FF4345F /* SharedAppGroup.swift */,
 				2D929B8330841495FF67A3FA /* WorkspaceBookmarkStore.swift */,
 			);
 			path = Storage;
@@ -676,6 +682,7 @@
 				0BA47DB3BD12C4127C518BC0 /* PartialEmailAnalysisExtractor.swift in Sources */,
 				DE72B58CC4C04484A17CEA28 /* RawEmailDataStore.swift in Sources */,
 				C934CEF70907491404A4F92F /* ReminderService.swift in Sources */,
+				F76C25A65BFFBDE919E03DB2 /* SharedAppGroup.swift in Sources */,
 				96CF30ADE4AD8561B7ECC7A2 /* VertexGeminiClient.swift in Sources */,
 				AAAE6604A565B9F63006D853 /* WorkspaceBookmarkStore.swift in Sources */,
 			);
@@ -724,6 +731,7 @@
 				C76C9804740FAFFEC2D423A7 /* RawEmailDataStore.swift in Sources */,
 				B1C811E34D0CA6CBAAB6A849 /* ReminderScheduleAndFlagTests.swift in Sources */,
 				B2780DAEB6A3A7DC6952218D /* ReminderService.swift in Sources */,
+				D37B1F5C5C6E6F1D98A16097 /* SharedAppGroup.swift in Sources */,
 				AA64B61E2ED1D92004FC3E0E /* VertexGeminiClient.swift in Sources */,
 				E7E029CE21DD44D85B5E7C0E /* VertexGeminiClientTests.swift in Sources */,
 				60B1FC704FAD63109999E46B /* WorkspaceBookmarkStore.swift in Sources */,
@@ -765,6 +773,7 @@
 				05438046EEAFF4B1AE1A0234 /* PartialEmailAnalysisExtractor.swift in Sources */,
 				3047A313DF2047CAFB7F90A2 /* RawEmailDataStore.swift in Sources */,
 				C9B04E8FAE74C55A495A538C /* ReminderService.swift in Sources */,
+				C01B0FB29720B9E2A53C0F20 /* SharedAppGroup.swift in Sources */,
 				119FF84963286F91D063E35E /* VertexGeminiClient.swift in Sources */,
 				E6DA9718D5ACBE523D4FC327 /* WorkspaceBookmarkStore.swift in Sources */,
 			);
@@ -800,6 +809,7 @@
 				EC30F7C4AC3A5068E4506618 /* PartialEmailAnalysisExtractor.swift in Sources */,
 				1D6C0BD1AB2747AF1743AD0F /* RawEmailDataStore.swift in Sources */,
 				26DF8146D013FD0EA6FF351A /* ReminderService.swift in Sources */,
+				2E8F73BE9FCA289A629BDD99 /* SharedAppGroup.swift in Sources */,
 				F1148F746DE174E865E20B0F /* VertexGeminiClient.swift in Sources */,
 				CFBAF1D7AADDD1A305AF96CD /* WorkspaceBookmarkStore.swift in Sources */,
 			);

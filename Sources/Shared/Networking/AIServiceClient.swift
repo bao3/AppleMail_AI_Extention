@@ -79,8 +79,28 @@ public final class AIServiceClient: Sendable {
                 throw AIServiceError.missingProjectID
             }
             let url = try buildGeminiEndpointURL(profile: resolvedProfile, model: model, action: "countTokens")
-            let count = try await sendGeminiCountTokens(url: url, apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders)
-            return "Vertex AI (\(model)) 连接正常 · countTokens = \(count)"
+            do {
+                let count = try await sendGeminiCountTokens(url: url, apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders)
+                return "Vertex AI (\(model)) 连接正常 · countTokens = \(count)"
+            } catch let error as AIServiceError {
+                if case let .httpError(statusCode, _) = error,
+                   statusCode == 404 || statusCode == 405 || statusCode == 501
+                {
+                    let genURL = try buildGeminiEndpointURL(profile: resolvedProfile, model: model, action: "generateContent")
+                    let body: [String: Any] = [
+                        "contents": [["role": "user", "parts": [["text": "hello"]]]],
+                        "generationConfig": ["maxOutputTokens": 128, "temperature": 0]
+                    ]
+                    let data = try await sendJSONRequest(
+                        url: genURL,
+                        headers: geminiHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders),
+                        bodyObject: body
+                    )
+                    try Self.validateConnectivityResponseData(data)
+                    return "Vertex AI (\(model)) 连接正常"
+                }
+                throw error
+            }
 
         case .geminiDeveloper:
             let countURL = try buildGeminiEndpointURL(profile: resolvedProfile, model: model, action: "countTokens")
@@ -93,15 +113,15 @@ public final class AIServiceClient: Sendable {
                 {
                     let genURL = try buildGeminiEndpointURL(profile: resolvedProfile, model: model, action: "generateContent")
                     let body: [String: Any] = [
-                        "contents": [["role": "user", "parts": [["text": "Reply with OK"]]]],
-                        "generationConfig": ["maxOutputTokens": 16, "temperature": 0]
+                        "contents": [["role": "user", "parts": [["text": "hello"]]]],
+                        "generationConfig": ["maxOutputTokens": 128, "temperature": 0]
                     ]
                     let data = try await sendJSONRequest(
                         url: genURL,
                         headers: geminiHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders),
                         bodyObject: body
                     )
-                    _ = try Self.extractGeminiJSONResponse(from: data)
+                    try Self.validateConnectivityResponseData(data)
                     return "Gemini Developer (\(model)) 连接正常"
                 }
                 throw error
@@ -112,9 +132,9 @@ public final class AIServiceClient: Sendable {
             let body: [String: Any] = [
                 "model": model,
                 "messages": [
-                    ["role": "user", "content": "Reply with OK"]
+                    ["role": "user", "content": "hello"]
                 ],
-                "max_tokens": 16,
+                "max_tokens": 128,
                 "temperature": 0,
                 "stream": false
             ]
@@ -123,16 +143,16 @@ public final class AIServiceClient: Sendable {
                 headers: openAIHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders),
                 bodyObject: body
             )
-            _ = try Self.extractOpenAINonStreamingResponse(from: data)
+            try Self.validateConnectivityResponseData(data)
             return "OpenAI 兼容接口 (\(model)) 连接正常"
 
         case .anthropic:
             let url = try buildAnthropicMessagesURL(profile: resolvedProfile)
             let body: [String: Any] = [
                 "model": model,
-                "max_tokens": 16,
+                "max_tokens": 128,
                 "messages": [
-                    ["role": "user", "content": "Reply with OK"]
+                    ["role": "user", "content": "hello"]
                 ],
                 "stream": false
             ]
@@ -141,8 +161,70 @@ public final class AIServiceClient: Sendable {
                 headers: anthropicHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders),
                 bodyObject: body
             )
-            _ = try Self.extractAnthropicNonStreamingResponse(from: data)
+            try Self.validateConnectivityResponseData(data)
             return "Anthropic Claude (\(model)) 连接正常"
+        }
+    }
+
+    /// Fetches available model identifiers from the provider's `/models` endpoint (with a curated fallback for Vertex AI).
+    public func fetchAvailableModels(
+        profile: AIProviderProfile,
+        apiKey: String
+    ) async throws -> [String] {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            throw AIServiceError.missingAPIKey(providerName: profile.name)
+        }
+
+        let resolvedProfile = resolveProjectFallback(profile)
+
+        switch resolvedProfile.kind {
+        case .openAICompatible:
+            let url = try buildOpenAIModelsURL(profile: resolvedProfile)
+            let headers = getHeaders(from: openAIHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders))
+            let data = try await sendGETRequest(url: url, headers: headers)
+            return try Self.extractModelIDs(from: data, kind: .openAICompatible)
+
+        case .geminiDeveloper:
+            let url = try buildGeminiModelsURL(profile: resolvedProfile)
+            let headers = getHeaders(from: geminiHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders))
+            let data = try await sendGETRequest(url: url, headers: headers)
+            return try Self.extractModelIDs(from: data, kind: .geminiDeveloper)
+
+        case .anthropic:
+            let url = try buildAnthropicModelsURL(profile: resolvedProfile)
+            let headers = getHeaders(from: anthropicHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders))
+            let data = try await sendGETRequest(url: url, headers: headers)
+            return try Self.extractModelIDs(from: data, kind: .anthropic)
+
+        case .vertexAI:
+            let projectID = resolvedProfile.projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !projectID.isEmpty else {
+                throw AIServiceError.missingProjectID
+            }
+            let url = try buildVertexModelsURL(profile: resolvedProfile)
+            let headers = getHeaders(from: geminiHeaders(apiKey: trimmedKey, customHeaders: resolvedProfile.customHeaders))
+            do {
+                let data = try await sendGETRequest(url: url, headers: headers)
+                let models = try Self.extractModelIDs(from: data, kind: .vertexAI)
+                if !models.isEmpty {
+                    return models
+                }
+            } catch let error as AIServiceError {
+                if case let .httpError(statusCode, _) = error,
+                   [401, 403, 404, 405, 501].contains(statusCode)
+                {
+                    let curated = [resolvedProfile.fastModel, resolvedProfile.deepModel]
+                        + GeminiModel.allCases.map(\.rawValue)
+                        + ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.8-flash", "gemini-4-carbon", "gemini-4-hydrogen"]
+                    return Self.normalizeAndSortModelIDs(curated)
+                }
+                throw error
+            }
+            let curated = [resolvedProfile.fastModel, resolvedProfile.deepModel]
+                + GeminiModel.allCases.map(\.rawValue)
+                + ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.8-flash", "gemini-4-carbon", "gemini-4-hydrogen"]
+            return Self.normalizeAndSortModelIDs(curated)
         }
     }
 
@@ -151,7 +233,8 @@ public final class AIServiceClient: Sendable {
         profile: AIProviderProfile? = nil,
         tier: AIModelTier? = nil,
         apiKeyOverride: String? = nil,
-        onPartial: (@Sendable (PartialAnalysisSnapshot) -> Void)? = nil
+        onPartial: (@Sendable (PartialAnalysisSnapshot) -> Void)? = nil,
+        onConnectionStateChanged: (@Sendable (Bool) -> Void)? = nil
     ) async throws -> EmailAIAnalysis {
         let resolvedProfile = resolveProjectFallback(profile ?? providerStore.activeProfile)
         let resolvedTier = tier ?? providerStore.preferredTier
@@ -170,6 +253,7 @@ public final class AIServiceClient: Sendable {
             userPrompt: userPrompt,
             temperature: 0.2,
             geminiResponseSchema: Self.emailAnalysisResponseSchema(),
+            onConnectionStateChanged: onConnectionStateChanged,
             onPartial: onPartial
         )
         let latencyMs = Int(Date().timeIntervalSince(started) * 1000)
@@ -335,6 +419,7 @@ public final class AIServiceClient: Sendable {
         userPrompt: String,
         temperature: Double,
         geminiResponseSchema: [String: Any]?,
+        onConnectionStateChanged: (@Sendable (Bool) -> Void)? = nil,
         onPartial: (@Sendable (PartialAnalysisSnapshot) -> Void)?
     ) async throws -> StreamedResult {
         let request = try buildStreamingRequest(
@@ -360,6 +445,8 @@ public final class AIServiceClient: Sendable {
             let message = Self.extractServerErrorMessage(from: errorData)
             throw AIServiceError.httpError(statusCode: http.statusCode, message: message)
         }
+
+        onConnectionStateChanged?(true)
 
         let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
         let isExplicitJSON = contentType.contains("application/json") && !contentType.contains("text/event-stream")
@@ -607,6 +694,46 @@ public final class AIServiceClient: Sendable {
         return url
     }
 
+    private func buildOpenAIModelsURL(profile: AIProviderProfile) throws -> URL {
+        let base = profile.normalizedBaseURL
+        let urlString: String
+        if base.hasSuffix("/chat/completions") {
+            urlString = String(base.dropLast("/chat/completions".count)) + "/models"
+        } else if base.hasSuffix("/models") {
+            urlString = base
+        } else {
+            urlString = "\(base)/models"
+        }
+        guard let url = URL(string: urlString), url.scheme != nil, url.host != nil else {
+            throw AIServiceError.invalidBaseURL(urlString)
+        }
+        return url
+    }
+
+    private func buildGeminiModelsURL(profile: AIProviderProfile) throws -> URL {
+        let base = profile.normalizedBaseURL
+        let urlString = base.hasSuffix("/models") ? base : "\(base)/models"
+        guard let url = URL(string: urlString), url.scheme != nil, url.host != nil else {
+            throw AIServiceError.invalidBaseURL(urlString)
+        }
+        return url
+    }
+
+    private func buildVertexModelsURL(profile: AIProviderProfile) throws -> URL {
+        let base = profile.normalizedBaseURL
+        let projectID = profile.projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let location = profile.location.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? GeminiModel.vertexLocation
+            : profile.location.trimmingCharacters(in: .whitespacesAndNewlines)
+        let encodedProject = projectID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? projectID
+        let encodedLocation = location.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? location
+        let urlString = "\(base)/projects/\(encodedProject)/locations/\(encodedLocation)/publishers/google/models"
+        guard let url = URL(string: urlString), url.scheme != nil, url.host != nil else {
+            throw AIServiceError.invalidBaseURL(urlString)
+        }
+        return url
+    }
+
     private func buildAnthropicMessagesURL(profile: AIProviderProfile) throws -> URL {
         let base = profile.normalizedBaseURL
         let urlString = base.hasSuffix("/messages") ? base : "\(base)/messages"
@@ -614,6 +741,29 @@ public final class AIServiceClient: Sendable {
             throw AIServiceError.invalidBaseURL(urlString)
         }
         return url
+    }
+
+    private func buildAnthropicModelsURL(profile: AIProviderProfile) throws -> URL {
+        let base = profile.normalizedBaseURL
+        let urlString: String
+        if base.hasSuffix("/messages") {
+            urlString = String(base.dropLast("/messages".count)) + "/models"
+        } else if base.hasSuffix("/models") {
+            urlString = base
+        } else {
+            urlString = "\(base)/models"
+        }
+        guard let url = URL(string: urlString), url.scheme != nil, url.host != nil else {
+            throw AIServiceError.invalidBaseURL(urlString)
+        }
+        return url
+    }
+
+    private func getHeaders(from baseHeaders: [String: String]) -> [String: String] {
+        var headers = baseHeaders
+        headers.removeValue(forKey: "Content-Type")
+        headers["Accept"] = "application/json"
+        return headers
     }
 
     private func geminiHeaders(apiKey: String, customHeaders: [String: String]) -> [String: String] {
@@ -697,6 +847,21 @@ public final class AIServiceClient: Sendable {
         return decoded.totalTokens ?? 0
     }
 
+    /// Accepts any non-empty HTTP 2xx payload that does not embed an explicit JSON error object.
+    private static func validateConnectivityResponseData(_ data: Data) throws {
+        let raw = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            throw AIServiceError.emptyModelOutput
+        }
+        if let errEnvelope = try? JSONDecoder().decode(GenericSSEErrorEnvelope.self, from: data),
+           let err = errEnvelope.error,
+           let message = err.message,
+           !message.isEmpty
+        {
+            throw AIServiceError.httpError(statusCode: err.code ?? 500, message: message)
+        }
+    }
+
     private func sendJSONRequest(
         url: URL,
         headers: [String: String],
@@ -708,7 +873,22 @@ public final class AIServiceClient: Sendable {
             request.setValue(value, forHTTPHeaderField: field)
         }
         request.httpBody = try JSONSerialization.data(withJSONObject: bodyObject, options: [])
+        return try await performRequest(request)
+    }
 
+    private func sendGETRequest(
+        url: URL,
+        headers: [String: String]
+    ) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        for (field, value) in headers {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        return try await performRequest(request)
+    }
+
+    private func performRequest(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw AIServiceError.invalidResponse
@@ -720,6 +900,112 @@ public final class AIServiceClient: Sendable {
             )
         }
         return data
+    }
+
+    private static func normalizeAndSortModelIDs(_ rawIDs: [String]) -> [String] {
+        var seen = Set<String>()
+        var unique: [String] = []
+        for raw in rawIDs {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            unique.append(trimmed)
+        }
+        return unique.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private static func stripModelResourcePrefix(_ raw: String) -> String {
+        if let range = raw.range(of: "/models/", options: .backwards) {
+            return String(raw[range.upperBound...])
+        }
+        if raw.hasPrefix("models/") {
+            return String(raw.dropFirst("models/".count))
+        }
+        return raw
+    }
+
+    private static func extractModelIDs(from data: Data, kind: AIProviderKind) throws -> [String] {
+        try validateConnectivityResponseData(data)
+
+        struct IDDataEnvelope: Decodable {
+            struct Item: Decodable { let id: String }
+            let data: [Item]?
+        }
+        struct ModelsListEnvelope: Decodable {
+            struct Item: Decodable {
+                let id: String?
+                let name: String?
+                let supportedGenerationMethods: [String]?
+            }
+            let models: [Item]?
+            let publisherModels: [Item]?
+        }
+
+        let decoder = JSONDecoder()
+        let collected: [String]
+
+        switch kind {
+        case .openAICompatible:
+            if let envelope = try? decoder.decode(IDDataEnvelope.self, from: data),
+               let items = envelope.data, !items.isEmpty
+            {
+                collected = items.map(\.id)
+            } else if let envelope = try? decoder.decode(ModelsListEnvelope.self, from: data),
+                      let items = envelope.models, !items.isEmpty
+            {
+                collected = items.compactMap { $0.id ?? $0.name }
+            } else if let plainArray = try? decoder.decode([String].self, from: data), !plainArray.isEmpty {
+                collected = plainArray
+            } else {
+                throw AIServiceError.malformedJSON(
+                    rawText: String(decoding: data, as: UTF8.self),
+                    underlyingError: "无法解析 OpenAI /models 响应体"
+                )
+            }
+
+        case .geminiDeveloper:
+            guard let envelope = try? decoder.decode(ModelsListEnvelope.self, from: data),
+                  let items = envelope.models
+            else {
+                throw AIServiceError.malformedJSON(
+                    rawText: String(decoding: data, as: UTF8.self),
+                    underlyingError: "无法解析 Gemini /models 响应体"
+                )
+            }
+            let generateCapable = items.filter {
+                $0.supportedGenerationMethods?.contains("generateContent") == true
+            }
+            let preferred = generateCapable.isEmpty ? items : generateCapable
+            collected = preferred.compactMap { $0.name ?? $0.id }.map(stripModelResourcePrefix)
+
+        case .anthropic:
+            guard let envelope = try? decoder.decode(IDDataEnvelope.self, from: data),
+                  let items = envelope.data
+            else {
+                throw AIServiceError.malformedJSON(
+                    rawText: String(decoding: data, as: UTF8.self),
+                    underlyingError: "无法解析 Anthropic /models 响应体"
+                )
+            }
+            collected = items.map(\.id)
+
+        case .vertexAI:
+            if let envelope = try? decoder.decode(ModelsListEnvelope.self, from: data) {
+                let items = (envelope.models ?? []) + (envelope.publisherModels ?? [])
+                collected = items.compactMap { $0.name ?? $0.id }.map(stripModelResourcePrefix)
+            } else if let envelope = try? decoder.decode(IDDataEnvelope.self, from: data),
+                      let items = envelope.data
+            {
+                collected = items.map(\.id).map(stripModelResourcePrefix)
+            } else {
+                collected = []
+            }
+        }
+
+        let sorted = normalizeAndSortModelIDs(collected)
+        guard !sorted.isEmpty else {
+            throw AIServiceError.emptyModelOutput
+        }
+        return sorted
     }
 
     // MARK: - SSE & Non-Streaming Decoders
@@ -940,7 +1226,7 @@ public final class AIServiceClient: Sendable {
         语义高亮标记规则（仅用于 `headline`、`coreConclusions`、`todos[].task`、`plainChineseTranslation` 和 `timeline[].summary` 文本内，每句克制标记 1~3 处关键短语，切勿整句套壳）：
         - `==...==` 标记严重痛点、阻塞项、拒绝原因、异议或风险（例如：`==内容过于简单==`、`==交期延迟2周==`）
         - `**...**` 标记核心诉求、明确决策或关键动作（例如：`**提供详细漏洞管理流程的正式PDF文档**`）
-        - `` `...` `` 标记产品型号/SKU、文档名、标准规范或关键报价数值（例如：`` `Moxa_ENISA_SRP` ``、`` `EDS-4012` ``、`` `USD 485` ``）
+        - 单反引号包裹（如 `Moxa_ENISA_SRP`、`EDS-4012`、`USD 485`）：标记产品型号/SKU、文档名、标准规范或关键报价数值（仅使用单反引号，禁止使用双反引号嵌套）
 
         各字段规范与 JSON Schema 定义：
         1. `headline` (string): 用一句话概括这封邮件最核心的结论或诉求（可使用语义高亮标记）。

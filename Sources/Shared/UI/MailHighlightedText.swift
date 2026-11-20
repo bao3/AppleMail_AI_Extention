@@ -74,6 +74,68 @@ public struct MailHighlightedText: View {
 
         var index = input.startIndex
         while index < input.endIndex {
+            if input[index] == "`" {
+                var contentStart = index
+                var tickCount = 0
+                while contentStart < input.endIndex && input[contentStart] == "`" {
+                    tickCount += 1
+                    contentStart = input.index(after: contentStart)
+                }
+                let lineEnd = input[contentStart...].firstIndex(where: { $0.isNewline }) ?? input.endIndex
+
+                if tickCount == 1 {
+                    if contentStart < lineEnd,
+                       let closeRange = input.range(of: "`", range: contentStart..<lineEnd) {
+                        let inner = String(input[contentStart..<closeRange.lowerBound])
+                        if !inner.isEmpty {
+                            flushPlain()
+                            segments.append(.code(inner))
+                            index = closeRange.upperBound
+                            continue
+                        }
+                    }
+                    plainBuffer.append("`")
+                    index = contentStart
+                    continue
+                }
+
+                // Multi-backtick span (e.g., `` `AES-256-CBC` ``, ``DA-682B-PMU-C3``, ```AWK```)
+                var cursor = contentStart
+                var didMatchMultiTick = false
+                while cursor < lineEnd {
+                    if input[cursor] == "`" {
+                        let closeStart = cursor
+                        var closeEnd = cursor
+                        var closeCount = 0
+                        while closeEnd < lineEnd && input[closeEnd] == "`" {
+                            closeCount += 1
+                            closeEnd = input.index(after: closeEnd)
+                        }
+                        if closeCount == tickCount {
+                            let cleaned = Self.unwrapNestedCodeSpanContent(String(input[contentStart..<closeStart]))
+                            if !cleaned.isEmpty {
+                                flushPlain()
+                                segments.append(.code(cleaned))
+                                index = closeEnd
+                                didMatchMultiTick = true
+                                break
+                            }
+                        }
+                        cursor = closeEnd
+                    } else {
+                        cursor = input.index(after: cursor)
+                    }
+                }
+
+                if didMatchMultiTick {
+                    continue
+                }
+
+                plainBuffer.append(contentsOf: input[index..<contentStart])
+                index = contentStart
+                continue
+            }
+
             let remaining = input[index...]
 
             let matchedMarker: (delimiter: String, makeSegment: (String) -> MailHighlightSegment)?
@@ -81,8 +143,6 @@ public struct MailHighlightedText: View {
                 matchedMarker = ("==", MailHighlightSegment.highlight)
             } else if remaining.hasPrefix("**") {
                 matchedMarker = ("**", MailHighlightSegment.strong)
-            } else if remaining.hasPrefix("`") {
-                matchedMarker = ("`", MailHighlightSegment.code)
             } else {
                 matchedMarker = nil
             }
@@ -114,6 +174,29 @@ public struct MailHighlightedText: View {
 
         flushPlain()
         return segments
+    }
+
+    private nonisolated static func unwrapNestedCodeSpanContent(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespaces)
+        while value.count >= 2, value.hasPrefix("`"), value.hasSuffix("`") {
+            let leadingTicks = value.prefix(while: { $0 == "`" }).count
+            let trailingTicks = value.reversed().prefix(while: { $0 == "`" }).count
+            let stripCount = min(leadingTicks, trailingTicks)
+            guard stripCount > 0, value.count > stripCount * 2 else {
+                break
+            }
+            let startIdx = value.index(value.startIndex, offsetBy: stripCount)
+            let endIdx = value.index(value.endIndex, offsetBy: -stripCount)
+            let unwrapped = String(value[startIdx..<endIdx]).trimmingCharacters(in: .whitespaces)
+            guard !unwrapped.isEmpty else {
+                break
+            }
+            value = unwrapped
+        }
+        if value.allSatisfy({ $0 == "`" }) {
+            return ""
+        }
+        return value
     }
 
     /// Strips semantic inline highlight markers (`==...==`, `**...**`, `` `...` ``) into clean plain text.

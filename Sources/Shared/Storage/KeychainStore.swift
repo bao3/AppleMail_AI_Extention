@@ -26,7 +26,10 @@ public enum KeychainError: LocalizedError {
 /// Uses the file-based Keychain (no `kSecUseDataProtectionKeychain` / `keychain-access-groups`)
 /// so both the sandboxed host app and MailKit appex work cleanly with Apple Development signing.
 public final class KeychainStore: @unchecked Sendable {
-    public static let shared = KeychainStore()
+    public static let shared = KeychainStore(
+        service: KeychainStore.defaultService,
+        userDefaults: SharedAppGroup.sharedUserDefaults
+    )
 
     public static let defaultService = "com.bao3.AppleMailAI.vertex-api-key"
     public static let apiKeyAccount = "vertex-api-key"

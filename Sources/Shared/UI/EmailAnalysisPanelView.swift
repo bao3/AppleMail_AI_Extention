@@ -12,6 +12,7 @@ final class EmailAnalysisViewModel: ObservableObject {
     @Published var isLoadingPrices = false
     @Published var isFromCache = false
     @Published var isLoading = false
+    @Published var isStreamConnected = false
     @Published var errorMessage: String?
     @Published var hasCredentials: Bool
     @Published var copiedToast: String?
@@ -59,6 +60,7 @@ final class EmailAnalysisViewModel: ObservableObject {
     }
 
     func refreshProviderState() {
+        providerStore.reload()
         let currentProfile = providerStore.activeProfile
         activeProfile = currentProfile
         profiles = providerStore.profiles
@@ -137,9 +139,13 @@ final class EmailAnalysisViewModel: ObservableObject {
         }
 
         isLoading = true
+        isStreamConnected = false
         errorMessage = nil
         partialSnapshot = nil
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            isStreamConnected = false
+        }
 
         let profileSnapshot = activeProfile
         let tierSnapshot = selectedTier
@@ -149,13 +155,20 @@ final class EmailAnalysisViewModel: ObservableObject {
                 email,
                 profile: profileSnapshot,
                 tier: tierSnapshot,
-                apiKeyOverride: apiKey
-            ) { [weak self] snapshot in
-                Task { @MainActor [weak self] in
-                    guard let self, self.isLoading else { return }
-                    self.partialSnapshot = snapshot
+                apiKeyOverride: apiKey,
+                onPartial: { [weak self] snapshot in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isLoading else { return }
+                        self.partialSnapshot = snapshot
+                    }
+                },
+                onConnectionStateChanged: { [weak self] connected in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.isLoading else { return }
+                        self.isStreamConnected = connected
+                    }
                 }
-            }
+            )
             try cacheStore.save(result, forMessageID: email.messageID)
             analysis = result
             partialSnapshot = nil
@@ -277,9 +290,13 @@ public struct EmailAnalysisPanelView: View {
     @State private var selectedPriceRecordForDetail: HistoricalPriceRecord?
     @State private var showRawLocalExtraction = false
     @State private var expandedPriceSKUs: Set<String> = []
+    @State private var revealedPriceGroupIDs: Set<String> = []
+    @State private var isBusinessPricesRevealed = false
+    public var onClose: (() -> Void)?
 
-    public init(email: ParsedEmailContext) {
+    public init(email: ParsedEmailContext, onClose: (() -> Void)? = nil) {
         _vm = StateObject(wrappedValue: EmailAnalysisViewModel(email: email))
+        self.onClose = onClose
     }
 
     public var body: some View {
@@ -420,6 +437,14 @@ public struct EmailAnalysisPanelView: View {
                     ) {
                         showKeychainSheet = true
                     }
+
+                    if let onClose {
+                        Button("关闭") {
+                            onClose()
+                        }
+                        .controlSize(.small)
+                        .keyboardShortcut(.cancelAction)
+                    }
                 }
             }
 
@@ -449,9 +474,15 @@ public struct EmailAnalysisPanelView: View {
                         .foregroundStyle(.green)
                         .lineLimit(1)
                 } else if vm.isLoading {
-                    Text("流式生成中")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(vm.isStreamConnected ? Color.green : Color.red)
+                            .frame(width: 6, height: 6)
+                        Text("流式生成中")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    .help(vm.isStreamConnected ? "已连接到服务器，正在流式接收响应" : "正在连接服务器…")
                 } else if vm.analysis != nil {
                     Text(vm.isFromCache ? "已缓存" : "实时")
                         .font(.system(size: 10.5))
@@ -509,6 +540,10 @@ public struct EmailAnalysisPanelView: View {
 
                     summarySection(analysis)
 
+                    if !analysis.timeline.isEmpty {
+                        timelineSection(analysis.timeline)
+                    }
+
                     if !analysis.todos.isEmpty {
                         todosSection(analysis.todos)
                     }
@@ -523,10 +558,6 @@ public struct EmailAnalysisPanelView: View {
 
                     if !analysis.plainChineseTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         translationSection(analysis.plainChineseTranslation)
-                    }
-
-                    if !analysis.timeline.isEmpty {
-                        timelineSection(analysis.timeline)
                     }
 
                     if !vm.email.attachments.isEmpty {
@@ -855,17 +886,39 @@ public struct EmailAnalysisPanelView: View {
     }
 
     private func historicalPricesSection(_ groups: [SKUPriceComparisonGroup]) -> some View {
-        MailSectionContainer(
+        let allRevealed = !groups.isEmpty && groups.allSatisfy { revealedPriceGroupIDs.contains($0.id) }
+        return MailSectionContainer(
             title: "历史报价参考 · Outlook KB",
             systemImage: "chart.line.uptrend.xyaxis",
             trailing: {
-                Text("\(groups.count) 个型号")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                HStack(spacing: 8) {
+                    if groups.count > 1 {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                if allRevealed {
+                                    revealedPriceGroupIDs.removeAll()
+                                } else {
+                                    revealedPriceGroupIDs.formUnion(groups.map(\.id))
+                                }
+                            }
+                        } label: {
+                            Text(allRevealed ? "全部隐藏" : "全部查看")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(allRevealed ? Color.secondary : Color.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                        .help(allRevealed ? "隐藏全部型号的历史价格" : "显示全部型号的历史价格")
+                    }
+
+                    Text("\(groups.count) 个型号")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
             }
         ) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(groups.enumerated()), id: \.element.id) { gIdx, group in
+                    let isRevealed = revealedPriceGroupIDs.contains(group.id)
                     VStack(alignment: .leading, spacing: 6) {
                         HStack(spacing: 6) {
                             Text(group.queriedSKU)
@@ -875,10 +928,24 @@ public struct EmailAnalysisPanelView: View {
                                 .background(Color.primary.opacity(0.06))
                                 .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
 
-                            if let rangeLabel = formatPriceRange(group) {
-                                Text(rangeLabel)
-                                    .font(.system(size: 11.5, weight: .semibold))
-                                    .foregroundStyle(.primary)
+                            if let range = formatPriceRangeParts(group) {
+                                HStack(spacing: 4) {
+                                    if !range.currency.isEmpty {
+                                        Text(range.currency)
+                                            .font(.system(size: 11.5, weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                    }
+                                    maskedPriceText(range.rangeText, isRevealed: isRevealed, fontSize: 11.5) {
+                                        toggleGroupReveal(group.id)
+                                    }
+                                }
+                            }
+
+                            priceRevealToggleButton(
+                                isRevealed: isRevealed,
+                                helpText: isRevealed ? "隐藏该型号价格" : "点击显示该型号价格"
+                            ) {
+                                toggleGroupReveal(group.id)
                             }
 
                             Spacer(minLength: 4)
@@ -896,7 +963,9 @@ public struct EmailAnalysisPanelView: View {
 
                         VStack(alignment: .leading, spacing: 0) {
                             ForEach(Array(visibleRecords.enumerated()), id: \.element.id) { rIdx, record in
-                                historicalPriceRow(record)
+                                historicalPriceRow(record, isRevealed: isRevealed) {
+                                    toggleGroupReveal(group.id)
+                                }
                                 if rIdx < visibleRecords.count - 1 {
                                     Divider().opacity(0.4)
                                 }
@@ -928,13 +997,89 @@ public struct EmailAnalysisPanelView: View {
         }
     }
 
-    private func historicalPriceRow(_ record: HistoricalPriceRecord) -> some View {
+    private func toggleGroupReveal(_ groupID: String) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            if revealedPriceGroupIDs.contains(groupID) {
+                revealedPriceGroupIDs.remove(groupID)
+            } else {
+                revealedPriceGroupIDs.insert(groupID)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func maskedPriceText(
+        _ valueText: String,
+        isRevealed: Bool,
+        fontSize: CGFloat,
+        onTapWhenMasked: (() -> Void)? = nil
+    ) -> some View {
+        let base = Text(valueText)
+            .font(.system(size: fontSize, weight: .semibold))
+            .foregroundStyle(.primary)
+
+        if isRevealed {
+            base.textSelection(.enabled)
+        } else {
+            base
+                .blur(radius: 6.5)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 0.5)
+                .background(.ultraThinMaterial)
+                .background(Color.primary.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(Color.primary.opacity(0.14), lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .onTapGesture {
+                    onTapWhenMasked?()
+                }
+                .help("价格已毛玻璃打码，点击或点「查看」显示")
+        }
+    }
+
+    private func priceRevealToggleButton(
+        isRevealed: Bool,
+        helpText: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(isRevealed ? "隐藏" : "查看")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(isRevealed ? Color.secondary : Color.accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background((isRevealed ? Color.primary : Color.accentColor).opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke((isRevealed ? Color.secondary : Color.accentColor).opacity(0.35), lineWidth: 0.6)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help(helpText)
+    }
+
+    private func historicalPriceRow(
+        _ record: HistoricalPriceRecord,
+        isRevealed: Bool,
+        onReveal: @escaping () -> Void
+    ) -> some View {
         HStack(alignment: .center, spacing: 8) {
             VStack(alignment: .leading, spacing: 2.5) {
                 HStack(spacing: 5) {
-                    Text("\(record.currency) \(Self.formatUnitPrice(record.unitPrice))")
-                        .font(.system(size: 12, weight: .semibold))
-                        .textSelection(.enabled)
+                    HStack(spacing: 4) {
+                        if !record.currency.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Text(record.currency.trimmingCharacters(in: .whitespacesAndNewlines))
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.primary)
+                        }
+                        maskedPriceText(Self.formatUnitPrice(record.unitPrice), isRevealed: isRevealed, fontSize: 12) {
+                            onReveal()
+                        }
+                    }
 
                     if !record.taxMode.isEmpty {
                         Text(record.taxMode)
@@ -1000,15 +1145,15 @@ public struct EmailAnalysisPanelView: View {
         .padding(.vertical, 4.5)
     }
 
-    private func formatPriceRange(_ group: SKUPriceComparisonGroup) -> String? {
+    private func formatPriceRangeParts(_ group: SKUPriceComparisonGroup) -> (currency: String, rangeText: String)? {
         guard let minPrice = group.minUnitPrice, let maxPrice = group.maxUnitPrice else {
             return nil
         }
-        let currencyPrefix = group.primaryCurrency.isEmpty ? "" : "\(group.primaryCurrency) "
+        let currency = group.primaryCurrency.trimmingCharacters(in: .whitespacesAndNewlines)
         if abs(minPrice - maxPrice) < 0.0001 {
-            return "\(currencyPrefix)\(Self.formatUnitPrice(minPrice))"
+            return (currency, Self.formatUnitPrice(minPrice))
         }
-        return "\(currencyPrefix)\(Self.formatUnitPrice(minPrice)) – \(Self.formatUnitPrice(maxPrice))"
+        return (currency, "\(Self.formatUnitPrice(minPrice)) – \(Self.formatUnitPrice(maxPrice))")
     }
 
     private static func formatUnitPrice(_ value: Double) -> String {
@@ -1016,7 +1161,22 @@ public struct EmailAnalysisPanelView: View {
     }
 
     private func businessSection(_ biz: BusinessElements) -> some View {
-        MailSectionContainer(title: "项目与商务要素", systemImage: "briefcase") {
+        MailSectionContainer(
+            title: "项目与商务要素",
+            systemImage: "briefcase",
+            trailing: {
+                if !biz.pricing.isEmpty {
+                    priceRevealToggleButton(
+                        isRevealed: isBusinessPricesRevealed,
+                        helpText: isBusinessPricesRevealed ? "隐藏本信报价金额" : "点击显示本信报价金额"
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isBusinessPricesRevealed.toggle()
+                        }
+                    }
+                }
+            }
+        ) {
             VStack(alignment: .leading, spacing: 8) {
                 if !biz.projects.isEmpty {
                     keyValueTagRow(label: "项目", items: biz.projects, monospaced: false)
@@ -1040,12 +1200,22 @@ public struct EmailAnalysisPanelView: View {
                                         .font(.system(size: 12.5, weight: .medium))
                                         .textSelection(.enabled)
                                     Spacer()
-                                    if let unitPrice = row.unitPrice, !unitPrice.isEmpty {
-                                        let currency = row.currency ?? ""
-                                        Text("\(currency) \(unitPrice)".trimmingCharacters(in: .whitespaces))
-                                            .font(.system(size: 12.5, weight: .semibold))
-                                            .foregroundStyle(.primary)
-                                            .textSelection(.enabled)
+                                    if let unitPrice = row.unitPrice?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       !unitPrice.isEmpty
+                                    {
+                                        let currency = (row.currency ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                                        HStack(spacing: 4) {
+                                            if !currency.isEmpty {
+                                                Text(currency)
+                                                    .font(.system(size: 12.5, weight: .semibold))
+                                                    .foregroundStyle(.primary)
+                                            }
+                                            maskedPriceText(unitPrice, isRevealed: isBusinessPricesRevealed, fontSize: 12.5) {
+                                                withAnimation(.easeInOut(duration: 0.18)) {
+                                                    isBusinessPricesRevealed = true
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 

@@ -54,6 +54,7 @@ final class HostDashboardViewModel: ObservableObject {
     }
 
     func refreshStats() {
+        providerStore.reload()
         let current = providerStore.activeProfile
         activeProfile = current
         preferredTier = providerStore.preferredTier
@@ -224,14 +225,23 @@ struct HostDashboardView: View {
             .frame(width: 520, height: 600)
         }
         .sheet(isPresented: $vm.showAnalyzerSheet, onDismiss: { vm.refreshStats() }) {
-            EmailAnalysisPanelView(email: vm.sampleParsedEmail)
-                .frame(width: 640, height: 680)
+            EmailAnalysisPanelView(
+                email: vm.sampleParsedEmail,
+                onClose: {
+                    vm.refreshStats()
+                    vm.showAnalyzerSheet = false
+                }
+            )
+            .frame(width: 640, height: 680)
         }
         .sheet(isPresented: $vm.showComposeSheet) {
             ComposeReplyPanelView(
                 originalEmail: vm.sampleParsedEmail,
                 draftSubject: "Re: \(vm.sampleParsedEmail.subject)",
-                recipients: [vm.sampleParsedEmail.from]
+                recipients: [vm.sampleParsedEmail.from],
+                onClose: {
+                    vm.showComposeSheet = false
+                }
             )
             .frame(width: 560, height: 600)
         }

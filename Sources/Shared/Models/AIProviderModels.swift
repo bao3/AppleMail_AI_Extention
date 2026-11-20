@@ -281,7 +281,11 @@ public struct AIProviderProfile: Codable, Sendable, Hashable, Identifiable {
 /// Thread-safe persistent store for AI provider profiles, active selection, and model tier preference.
 /// Automatically migrates v1.0.0 Vertex AI `projectID` and `preferredModel` settings on first load.
 public final class AIProviderStore: @unchecked Sendable {
-    public static let shared = AIProviderStore()
+    public static let shared = AIProviderStore(
+        userDefaults: SharedAppGroup.sharedUserDefaults,
+        keychainStore: KeychainStore.shared,
+        enableDistributedSync: SharedAppGroup.isUsingSharedGroup
+    )
 
     public static let profilesDefaultsKey = "com.bao3.AppleMailAI.aiProviderProfiles.v1"
     public static let activeProfileIDDefaultsKey = "com.bao3.AppleMailAI.activeProviderProfileID.v1"
@@ -290,6 +294,7 @@ public final class AIProviderStore: @unchecked Sendable {
 
     private let userDefaults: UserDefaults
     private let keychainStore: KeychainStore
+    private let enableDistributedSync: Bool
     private let lock = NSLock()
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -297,9 +302,15 @@ public final class AIProviderStore: @unchecked Sendable {
     private var _profiles: [AIProviderProfile] = []
     private var _activeProfileID: String = AIProviderProfile.defaultVertexProfileID
     private var _preferredTier: AIModelTier = .fast
+    private nonisolated(unsafe) var distributedObserver: NSObjectProtocol?
 
-    public init(userDefaults: UserDefaults = .standard, keychainStore: KeychainStore? = nil) {
+    public init(
+        userDefaults: UserDefaults = .standard,
+        keychainStore: KeychainStore? = nil,
+        enableDistributedSync: Bool = false
+    ) {
         self.userDefaults = userDefaults
+        self.enableDistributedSync = enableDistributedSync
         if let keychainStore {
             self.keychainStore = keychainStore
         } else if userDefaults === UserDefaults.standard {
@@ -308,6 +319,22 @@ public final class AIProviderStore: @unchecked Sendable {
             self.keychainStore = KeychainStore(service: KeychainStore.defaultService, userDefaults: userDefaults)
         }
         loadOrMigrateLocked()
+
+        if enableDistributedSync {
+            distributedObserver = DistributedNotificationCenter.default().addObserver(
+                forName: SharedAppGroup.distributedConfigDidChangeNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.reloadAndPostLocalNotification()
+            }
+        }
+    }
+
+    deinit {
+        if let observer = distributedObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+        }
     }
 
     public var profiles: [AIProviderProfile] {
@@ -324,7 +351,7 @@ public final class AIProviderStore: @unchecked Sendable {
             }
             persistLocked()
             lock.unlock()
-            NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+            postChangeNotifications()
         }
     }
 
@@ -383,7 +410,7 @@ public final class AIProviderStore: @unchecked Sendable {
         }
         persistLocked()
         lock.unlock()
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        postChangeNotifications()
     }
 
     public func deleteProfile(id: String) {
@@ -401,7 +428,7 @@ public final class AIProviderStore: @unchecked Sendable {
         }
         persistLocked()
         lock.unlock()
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        postChangeNotifications()
     }
 
     public func setActiveProfile(id: String) {
@@ -411,7 +438,7 @@ public final class AIProviderStore: @unchecked Sendable {
             persistLocked()
         }
         lock.unlock()
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        postChangeNotifications()
     }
 
     public func setPreferredTier(_ tier: AIModelTier) {
@@ -422,7 +449,7 @@ public final class AIProviderStore: @unchecked Sendable {
         }
         persistLocked()
         lock.unlock()
-        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        postChangeNotifications()
     }
 
     public func activeModelName(for tier: AIModelTier? = nil) -> String {
@@ -438,6 +465,18 @@ public final class AIProviderStore: @unchecked Sendable {
     }
 
     // MARK: - Private Helpers
+
+    private func postChangeNotifications() {
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+        if enableDistributedSync {
+            SharedAppGroup.postDistributedConfigDidChange()
+        }
+    }
+
+    private func reloadAndPostLocalNotification() {
+        reload()
+        NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
+    }
 
     private func resolveLegacyProjectFallbackIfNeeded(_ profile: AIProviderProfile) -> AIProviderProfile {
         guard profile.id == AIProviderProfile.defaultVertexProfileID, profile.projectID.isEmpty else {

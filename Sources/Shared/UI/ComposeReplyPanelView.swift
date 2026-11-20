@@ -63,6 +63,7 @@ final class ComposeReplyViewModel: ObservableObject {
     }
 
     func refreshProviderState() {
+        providerStore.reload()
         let currentProfile = providerStore.activeProfile
         activeProfile = currentProfile
         profiles = providerStore.profiles
@@ -175,6 +176,7 @@ final class ComposeReplyViewModel: ObservableObject {
 public struct ComposeReplyPanelView: View {
     @StateObject private var vm: ComposeReplyViewModel
     @State private var showKeychainSheet = false
+    public var onClose: (() -> Void)?
 
     private let quickIntents = [
         "确认收到报价，请补充 FOB/CIF 条款及交期",
@@ -183,12 +185,18 @@ public struct ComposeReplyPanelView: View {
         "告知客户已内部立项评估，将在 2 个工作日内正式答复"
     ]
 
-    public init(originalEmail: ParsedEmailContext?, draftSubject: String, recipients: [String]) {
+    public init(
+        originalEmail: ParsedEmailContext?,
+        draftSubject: String,
+        recipients: [String],
+        onClose: (() -> Void)? = nil
+    ) {
         _vm = StateObject(wrappedValue: ComposeReplyViewModel(
             originalEmail: originalEmail,
             draftSubject: draftSubject,
             recipients: recipients
         ))
+        self.onClose = onClose
     }
 
     public var body: some View {
@@ -324,6 +332,14 @@ public struct ComposeReplyPanelView: View {
 
             MailIconActionButton(systemImage: "gearshape", helpText: "AI 服务商与自动化设置") {
                 showKeychainSheet = true
+            }
+
+            if let onClose {
+                Button("关闭") {
+                    onClose()
+                }
+                .controlSize(.small)
+                .keyboardShortcut(.cancelAction)
             }
         }
         .padding(.horizontal, 14)

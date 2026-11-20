@@ -34,6 +34,9 @@ public final class WorkspaceBookmarkStore: ObservableObject {
 
     private let userDefaults: UserDefaults
 
+    /// Intentionally stays on per-container `UserDefaults.standard`: macOS app-scoped security
+    /// bookmarks (`com.apple.security.files.bookmarks.app-scope`) are cryptographically bound to
+    /// the creating sandbox container/binary and cannot be resolved across Host App and Extension.
     public init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         self.workspaceURL = resolvePersistedBookmark()

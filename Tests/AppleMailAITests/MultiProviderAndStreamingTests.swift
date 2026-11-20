@@ -738,4 +738,284 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         XCTAssertEqual(result.businessElements.pricing.first?.notes, "false")
         XCTAssertEqual(result.timeline.first?.timeOrStep, "1")
     }
+
+    func testVerifyConnectionSendsHelloAndAcceptsAnyNonErrorServerResponse() async throws {
+        let (defaults, suite) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let client = AIServiceClient(session: makeMockSession(), providerStore: AIProviderStore(userDefaults: defaults))
+        let openAIProfile = AIProviderProfile(
+            id: "openai-hello",
+            name: "OpenAI Proxy",
+            kind: .openAICompatible,
+            baseURL: "https://example.com/v1",
+            fastModel: "deepseek-reasoner",
+            deepModel: "gpt-5"
+        )
+
+        // 1. Reasoning-only / empty content response still counts as available
+        StreamingMockURLProtocol.setHandler { request in
+            let reqJSON = Self.requestBodyJSON(request)
+            let messages = reqJSON?["messages"] as? [[String: Any]]
+            XCTAssertEqual(messages?.first?["content"] as? String, "hello")
+
+            let envelope: [String: Any] = ["choices": [["message": ["content": NSNull(), "reasoning_content": "thinking..."]]]]
+            let data = try JSONSerialization.data(withJSONObject: envelope)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+
+        let ok = try await client.verifyConnection(profile: openAIProfile, apiKey: "sk-test", tier: .fast)
+        XCTAssertTrue(ok.contains("连接正常"))
+
+        // 2. Embedded JSON error object on HTTP 200 still fails
+        StreamingMockURLProtocol.setHandler { request in
+            let envelope: [String: Any] = ["error": ["code": 401, "message": "Invalid API Key"]]
+            let data = try JSONSerialization.data(withJSONObject: envelope)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+
+        do {
+            _ = try await client.verifyConnection(profile: openAIProfile, apiKey: "sk-bad", tier: .fast)
+            XCTFail("Expected embedded error to throw")
+        } catch let error as AIServiceError {
+            if case let .httpError(code, msg) = error {
+                XCTAssertEqual(code, 401)
+                XCTAssertEqual(msg, "Invalid API Key")
+            } else {
+                XCTFail("Unexpected AIServiceError: \(error)")
+            }
+        }
+    }
+
+    func testAnalyzeEmailReportsConnectionStateChangedOnHTTP200() async throws {
+        let (defaults, suite) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let client = AIServiceClient(session: makeMockSession(), providerStore: AIProviderStore(userDefaults: defaults))
+        let profile = AIProviderProfile(
+            id: "conn-test",
+            name: "Conn",
+            kind: .openAICompatible,
+            baseURL: "https://example.com/v1",
+            fastModel: "gpt-4o-mini",
+            deepModel: "gpt-4o"
+        )
+
+        StreamingMockURLProtocol.setHandler { request in
+            let payload = #"{"headline":"OK","suggestedFlag":"none","flagReason":"","coreConclusions":[],"todos":[],"businessElements":{"projects":[],"customers":[],"models":[],"pricing":[]},"plainChineseTranslation":"好","timeline":[]}"#
+            let envelope: [String: Any] = ["choices": [["message": ["content": payload]]]]
+            let data = try JSONSerialization.data(withJSONObject: envelope)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+
+        let box = ConnectionFlagBox()
+        _ = try await client.analyzeEmail(
+            makeSampleEmail(),
+            profile: profile,
+            tier: .fast,
+            apiKeyOverride: "sk-test",
+            onConnectionStateChanged: { connected in
+                box.set(connected)
+            }
+        )
+        XCTAssertTrue(box.value)
+    }
+
+    func testSharedAppGroupLegacyMigrationMergesHostAndExtensionWithoutLosingMagpie() throws {
+        let (hostLegacy, hostSuite) = makeIsolatedDefaults()
+        let (extLegacy, extSuite) = makeIsolatedDefaults()
+        let (sharedGroup, sharedSuite) = makeIsolatedDefaults()
+        defer {
+            hostLegacy.removePersistentDomain(forName: hostSuite)
+            extLegacy.removePersistentDomain(forName: extSuite)
+            sharedGroup.removePersistentDomain(forName: sharedSuite)
+        }
+
+        let encoder = JSONEncoder()
+        let hostVertex = AIProviderProfile.defaultVertexProfile(projectID: "")
+        hostLegacy.set(try encoder.encode([hostVertex]), forKey: AIProviderStore.profilesDefaultsKey)
+        hostLegacy.set(AIProviderProfile.defaultVertexProfileID, forKey: AIProviderStore.activeProfileIDDefaultsKey)
+
+        let extVertex = AIProviderProfile.defaultVertexProfile(projectID: "gen-lang-client-test")
+        let magpieProfile = AIProviderProfile(
+            id: "magpie-profile-id",
+            name: "Magpie",
+            kind: .openAICompatible,
+            baseURL: "http://192.168.50.60:3425/v1",
+            fastModel: "group/smart-split",
+            deepModel: "google-vertex/gemini-4-hydrogen"
+        )
+        extLegacy.set(try encoder.encode([extVertex, magpieProfile]), forKey: AIProviderStore.profilesDefaultsKey)
+        extLegacy.set(magpieProfile.id, forKey: AIProviderStore.activeProfileIDDefaultsKey)
+        extLegacy.set("gen-lang-client-test", forKey: KeychainStore.userDefaultsProjectIDKey)
+        extLegacy.set(["k1", "k2"], forKey: ReminderService.addedKeysDefaultsKey)
+        extLegacy.set(false, forKey: ExtensionOpsConfig.autoFlagMoxaPrimaryKey)
+
+        SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: hostLegacy, to: sharedGroup)
+        SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: extLegacy, to: sharedGroup)
+
+        let store = AIProviderStore(userDefaults: sharedGroup)
+        XCTAssertEqual(store.profiles.count, 2)
+        XCTAssertEqual(store.activeProfile.id, magpieProfile.id)
+        XCTAssertEqual(store.activeProfile.name, "Magpie")
+        XCTAssertEqual(store.profile(forID: AIProviderProfile.defaultVertexProfileID)?.projectID, "gen-lang-client-test")
+        XCTAssertEqual(sharedGroup.stringArray(forKey: ReminderService.addedKeysDefaultsKey), ["k1", "k2"])
+        XCTAssertEqual(sharedGroup.object(forKey: ExtensionOpsConfig.autoFlagMoxaPrimaryKey) as? Bool, false)
+
+        // Verify idempotency when re-run
+        SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: hostLegacy, to: sharedGroup)
+        SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: extLegacy, to: sharedGroup)
+        let storeReloaded = AIProviderStore(userDefaults: sharedGroup)
+        XCTAssertEqual(storeReloaded.profiles.count, 2)
+        XCTAssertEqual(storeReloaded.activeProfile.id, magpieProfile.id)
+    }
+
+    func testSharedAppGroupLegacyCacheMigrationCopiesMissingFilesNonDestructively() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("AppGroupCacheMig-\(UUID().uuidString)", isDirectory: true)
+        let legacyAppSupport = tempRoot.appendingPathComponent("LegacySupport", isDirectory: true)
+        let sharedAppSupport = tempRoot.appendingPathComponent("SharedSupport", isDirectory: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let legacyCache = legacyAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
+        let sharedCache = sharedAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
+        try fm.createDirectory(at: legacyCache, withIntermediateDirectories: true)
+        try fm.createDirectory(at: sharedCache, withIntermediateDirectories: true)
+
+        try Data("old-a".utf8).write(to: legacyCache.appendingPathComponent("a.json"))
+        try Data("from-legacy-b".utf8).write(to: legacyCache.appendingPathComponent("b.json"))
+        try Data("new-a".utf8).write(to: sharedCache.appendingPathComponent("a.json"))
+
+        SharedAppGroup.migrateLegacyCacheDirectoryIfNeeded(from: legacyAppSupport, to: sharedAppSupport)
+
+        let aData = try Data(contentsOf: sharedCache.appendingPathComponent("a.json"))
+        let bData = try Data(contentsOf: sharedCache.appendingPathComponent("b.json"))
+        XCTAssertEqual(String(decoding: aData, as: UTF8.self), "new-a")
+        XCTAssertEqual(String(decoding: bData, as: UTF8.self), "from-legacy-b")
+
+        let markerURL = legacyAppSupport.appendingPathComponent("AppleMailAI/.migrated-to-app-group")
+        XCTAssertTrue(fm.fileExists(atPath: markerURL.path))
+    }
+
+    func testFetchAvailableModelsSupportsOpenAIGeminiAndAnthropicResponses() async throws {
+        let (defaults, suite) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let client = AIServiceClient(session: makeMockSession(), providerStore: AIProviderStore(userDefaults: defaults))
+
+        // 1. OpenAI-compatible with /chat/completions suffix stripped -> /models
+        let openAIProfile = AIProviderProfile(
+            id: "openai-models",
+            name: "Magpie",
+            kind: .openAICompatible,
+            baseURL: "http://192.168.50.60:3425/v1/chat/completions"
+        )
+        StreamingMockURLProtocol.setHandler { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.absoluteString, "http://192.168.50.60:3425/v1/models")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test")
+            let body: [String: Any] = [
+                "data": [
+                    ["id": "gpt-4o"],
+                    ["id": "group/smart-split"],
+                    ["id": "gpt-4o"],
+                    ["id": "google-vertex/gemini-4-hydrogen"]
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+        let openAIModels = try await client.fetchAvailableModels(profile: openAIProfile, apiKey: "sk-test")
+        XCTAssertEqual(openAIModels, ["google-vertex/gemini-4-hydrogen", "gpt-4o", "group/smart-split"])
+
+        // 2. Gemini Developer strips "models/" and filters by generateContent
+        let geminiProfile = AIProviderProfile(
+            id: "gemini-models",
+            name: "Gemini",
+            kind: .geminiDeveloper,
+            baseURL: "https://generativelanguage.googleapis.com/v1beta"
+        )
+        StreamingMockURLProtocol.setHandler { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.absoluteString, "https://generativelanguage.googleapis.com/v1beta/models")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-goog-api-key"), "AIzaTest")
+            let body: [String: Any] = [
+                "models": [
+                    ["name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]],
+                    ["name": "models/gemini-2.5-pro", "supportedGenerationMethods": ["generateContent"]],
+                    ["name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent", "countTokens"]]
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+        let geminiModels = try await client.fetchAvailableModels(profile: geminiProfile, apiKey: "AIzaTest")
+        XCTAssertEqual(geminiModels, ["gemini-2.5-flash", "gemini-2.5-pro"])
+
+        // 3. Anthropic models endpoint
+        let anthropicProfile = AIProviderProfile(
+            id: "claude-models",
+            name: "Claude",
+            kind: .anthropic,
+            baseURL: "https://api.anthropic.com/v1"
+        )
+        StreamingMockURLProtocol.setHandler { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.absoluteString, "https://api.anthropic.com/v1/models")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-api-key"), "sk-ant-test")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-version"), "2023-06-01")
+            let body: [String: Any] = [
+                "data": [
+                    ["id": "claude-sonnet-4-20250514"],
+                    ["id": "claude-3-5-haiku-latest"]
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+        let anthropicModels = try await client.fetchAvailableModels(profile: anthropicProfile, apiKey: "sk-ant-test")
+        XCTAssertEqual(anthropicModels, ["claude-3-5-haiku-latest", "claude-sonnet-4-20250514"])
+
+        // 4. Embedded JSON error payload on HTTP 200 throws AIServiceError.httpError
+        StreamingMockURLProtocol.setHandler { request in
+            let body: [String: Any] = ["error": ["code": 403, "message": "Forbidden"]]
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+        do {
+            _ = try await client.fetchAvailableModels(profile: openAIProfile, apiKey: "sk-bad")
+            XCTFail("Expected embedded error to throw")
+        } catch let error as AIServiceError {
+            if case let .httpError(code, msg) = error {
+                XCTAssertEqual(code, 403)
+                XCTAssertEqual(msg, "Forbidden")
+            } else {
+                XCTFail("Unexpected AIServiceError: \(error)")
+            }
+        }
+    }
+}
+
+private final class ConnectionFlagBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value = false
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _value
+    }
+
+    func set(_ newValue: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        _value = newValue
+    }
 }

@@ -201,4 +201,95 @@ final class MailHighlightedTextTests: XCTestCase {
         XCTAssertEqual(MailHighlightedText.plainText("==紧急== **处理** `TN-4908`"), "紧急 处理 TN-4908")
         XCTAssertEqual(MailHighlightedText.plainText("进度==未闭合"), "进度==未闭合")
     }
+
+    func testNestedAndDoubleBacktickCodeSpansParseCleanly() {
+        let cases: [(input: String, expectedSegments: [MailHighlightSegment], expectedPlain: String)] = [
+            (
+                "整理提交交控关于 `` `AWK` `` 日志容量、`AES-128`、CRC 及超时断开等 6 项**网络安全追溯文档要求**",
+                [
+                    .plain("整理提交交控关于 "),
+                    .code("AWK"),
+                    .plain(" 日志容量、"),
+                    .code("AES-128"),
+                    .plain("、CRC 及超时断开等 6 项"),
+                    .strong("网络安全追溯文档要求")
+                ],
+                "整理提交交控关于 AWK 日志容量、AES-128、CRC 及超时断开等 6 项网络安全追溯文档要求"
+            ),
+            (
+                "澄清配置导出密码采用 `` `AES-256-CBC` `` 加密而非哈希",
+                [
+                    .plain("澄清配置导出密码采用 "),
+                    .code("AES-256-CBC"),
+                    .plain(" 加密而非哈希")
+                ],
+                "澄清配置导出密码采用 AES-256-CBC 加密而非哈希"
+            ),
+            (
+                "Web 登录走 `HTTPS/TLS` 通道且密码采用 `` `MD5` `` 哈希",
+                [
+                    .plain("Web 登录走 "),
+                    .code("HTTPS/TLS"),
+                    .plain(" 通道且密码采用 "),
+                    .code("MD5"),
+                    .plain(" 哈希")
+                ],
+                "Web 登录走 HTTPS/TLS 通道且密码采用 MD5 哈希"
+            ),
+            (
+                "针对 ``DA-682B-PMU-C3`` 剩余的 ``171 pcs`` CPU库存",
+                [
+                    .plain("针对 "),
+                    .code("DA-682B-PMU-C3"),
+                    .plain(" 剩余的 "),
+                    .code("171 pcs"),
+                    .plain(" CPU库存")
+                ],
+                "针对 DA-682B-PMU-C3 剩余的 171 pcs CPU库存"
+            ),
+            (
+                "``节后与经销商沟通`` ``DA-682B-PMU-C3``",
+                [
+                    .code("节后与经销商沟通"),
+                    .plain(" "),
+                    .code("DA-682B-PMU-C3")
+                ],
+                "节后与经销商沟通 DA-682B-PMU-C3"
+            ),
+            (
+                "采用 ```AWK``` 方案",
+                [
+                    .plain("采用 "),
+                    .code("AWK"),
+                    .plain(" 方案")
+                ],
+                "采用 AWK 方案"
+            ),
+            (
+                "注意 ``未闭合 文本",
+                [
+                    .plain("注意 ``未闭合 文本")
+                ],
+                "注意 ``未闭合 文本"
+            )
+        ]
+
+        for testCase in cases {
+            XCTAssertEqual(
+                MailHighlightedText.parseSegments(testCase.input),
+                testCase.expectedSegments,
+                "Failed parseSegments for: \(testCase.input)"
+            )
+            XCTAssertEqual(
+                MailHighlightedText.plainText(testCase.input),
+                testCase.expectedPlain,
+                "Failed plainText for: \(testCase.input)"
+            )
+            XCTAssertEqual(
+                String(MailHighlightedText.makeAttributedString(testCase.input).characters),
+                testCase.expectedPlain,
+                "Failed AttributedString text for: \(testCase.input)"
+            )
+        }
+    }
 }
