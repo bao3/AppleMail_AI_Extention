@@ -5,9 +5,10 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class HostDashboardViewModel: ObservableObject {
-    @Published var projectID: String = ""
+    @Published var activeProfile: AIProviderProfile
+    @Published var preferredTier: AIModelTier
     @Published var maskedKeyStatus: String?
-    @Published var preferredModel: GeminiModel
+    @Published var workspacePath: String?
     @Published var cacheCount: Int = 0
     @Published var cacheSizeText: String = "0 B"
     @Published var statusBanner: String?
@@ -15,55 +16,89 @@ final class HostDashboardViewModel: ObservableObject {
     @Published var sampleParsedEmail: ParsedEmailContext
     @Published var showAnalyzerSheet = false
     @Published var showComposeSheet = false
+    @Published var showFilingSheet = false
     @Published var showKeychainSheet = false
     @Published var showEMLImporter = false
 
     private let keychain: KeychainStore
+    private let providerStore: AIProviderStore
     private let cacheStore: AnalysisCacheStore
-    private let client: VertexGeminiClient
+    private let aiClient: AIServiceClient
+    private let bookmarkStore: WorkspaceBookmarkStore
 
     init(
         keychain: KeychainStore = .shared,
+        providerStore: AIProviderStore = .shared,
         cacheStore: AnalysisCacheStore = .shared,
-        client: VertexGeminiClient = .shared
+        aiClient: AIServiceClient = .shared,
+        bookmarkStore: WorkspaceBookmarkStore = .shared
     ) {
         self.keychain = keychain
+        self.providerStore = providerStore
         self.cacheStore = cacheStore
-        self.client = client
-        self.projectID = keychain.loadProjectID()
-        self.maskedKeyStatus = keychain.maskedAPIKeyStatus()
-        self.preferredModel = keychain.loadPreferredModel()
-        self.sampleParsedEmail = MIMEParser.parse(rawData: Self.builtInSampleEMLData)
+        self.aiClient = aiClient
+        self.bookmarkStore = bookmarkStore
+
+        let current = providerStore.activeProfile
+        self.activeProfile = current
+        self.preferredTier = providerStore.preferredTier
+        self.maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: current.id)
+        self.workspacePath = bookmarkStore.workspaceDisplayPath
+
+        let parsed = MIMEParser.parse(rawData: Self.builtInSampleEMLData)
+        self.sampleParsedEmail = parsed
+        if !parsed.nonInlineAttachments.isEmpty {
+            RawEmailDataStore.shared.store(rawData: Self.builtInSampleEMLData, forMessageID: parsed.messageID)
+        }
         refreshStats()
     }
 
     func refreshStats() {
-        projectID = keychain.loadProjectID()
-        maskedKeyStatus = keychain.maskedAPIKeyStatus()
-        preferredModel = keychain.loadPreferredModel()
+        let current = providerStore.activeProfile
+        activeProfile = current
+        preferredTier = providerStore.preferredTier
+        maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: current.id)
+        workspacePath = bookmarkStore.workspaceDisplayPath
         let stats = cacheStore.cacheStats()
         cacheCount = stats.count
         cacheSizeText = ByteCountFormatter.string(fromByteCount: stats.totalBytes, countStyle: .file)
     }
 
-    func selectDefaultModel(_ model: GeminiModel) {
-        preferredModel = model
-        keychain.savePreferredModel(model)
-        statusBanner = "默认模型已切换为 \(model.displayName) (\(model.rawValue))。"
+    func selectDefaultTier(_ tier: AIModelTier) {
+        preferredTier = tier
+        providerStore.setPreferredTier(tier)
+        let modelName = activeProfile.modelName(for: tier)
+        statusBanner = "默认模型档位已切换为 \(tier.displayName)（\(activeProfile.name) · \(modelName)）。"
     }
 
-    func verifyBothModels() async {
-        guard let apiKey = keychain.loadAPIKey() else {
-            statusBanner = "⚠️ Keychain 中尚未配置 API Key，请先点击「配置 Keychain」。"
+    func chooseWorkspaceDirectory() {
+        if let url = bookmarkStore.chooseWorkspaceDirectory() {
+            workspacePath = url.path
+            statusBanner = "✅ 已授权附件归档工作区：\(url.path)"
+        }
+    }
+
+    func verifyActiveProvider() async {
+        refreshStats()
+        guard let apiKey = keychain.loadAPIKey(forProfileID: activeProfile.id) else {
+            statusBanner = "⚠️ Keychain 中尚未配置「\(activeProfile.name)」的 API Key，请先点击「配置 AI 服务商与凭据」。"
             return
         }
         isCheckingConnection = true
         defer { isCheckingConnection = false }
 
         do {
-            let t1 = try await client.verifyAPIKeyAndModel(apiKey: apiKey, model: .flash38)
-            let t2 = try await client.verifyAPIKeyAndModel(apiKey: apiKey, model: .carbon4)
-            statusBanner = "✅ 双模型 countTokens 零成本校验通过：gemini-3.8-flash (\(t1)) · gemini-4-carbon (\(t2))"
+            let fastResult = try await aiClient.verifyConnection(
+                profile: activeProfile,
+                apiKey: apiKey,
+                tier: .fast
+            )
+            let deepResult = try await aiClient.verifyConnection(
+                profile: activeProfile,
+                apiKey: apiKey,
+                tier: .deep
+            )
+            statusBanner = "✅ 连通性校验通过：\(fastResult) ｜ \(deepResult)"
         } catch {
             statusBanner = "❌ 校验失败：\(error.localizedDescription)"
         }
@@ -98,8 +133,12 @@ final class HostDashboardViewModel: ObservableObject {
                 statusBanner = "⚠️ 该 .eml 为 S/MIME 或 PGP 加密信封，扩展会原样交还 Apple Mail 原生解密。"
                 return
             }
-            sampleParsedEmail = MIMEParser.parse(rawData: data)
-            statusBanner = "✅ 已本地解析 \(url.lastPathComponent)：正文 \(sampleParsedEmail.plainBody.count) 字 · 引用 \(sampleParsedEmail.quotedChain.count) 段 · 附件 \(sampleParsedEmail.attachments.count) 个。"
+            let parsed = MIMEParser.parse(rawData: data)
+            sampleParsedEmail = parsed
+            if !parsed.nonInlineAttachments.isEmpty {
+                RawEmailDataStore.shared.store(rawData: data, forMessageID: parsed.messageID)
+            }
+            statusBanner = "✅ 已本地解析 \(url.lastPathComponent)：正文 \(parsed.plainBody.count) 字 · 引用 \(parsed.quotedChain.count) 段 · 附件 \(parsed.attachments.count) 个。"
         } catch {
             statusBanner = "❌ 读取 .eml 失败：\(error.localizedDescription)"
         }
@@ -173,9 +212,16 @@ struct HostDashboardView: View {
             detailArea
         }
         .sheet(isPresented: $vm.showKeychainSheet, onDismiss: { vm.refreshStats() }) {
-            KeychainSettingsSheet {
-                vm.refreshStats()
-            }
+            KeychainSettingsSheet(
+                onSavedKey: {
+                    vm.refreshStats()
+                },
+                onClose: {
+                    vm.refreshStats()
+                    vm.showKeychainSheet = false
+                }
+            )
+            .frame(width: 520, height: 600)
         }
         .sheet(isPresented: $vm.showAnalyzerSheet, onDismiss: { vm.refreshStats() }) {
             EmailAnalysisPanelView(email: vm.sampleParsedEmail)
@@ -189,6 +235,16 @@ struct HostDashboardView: View {
             )
             .frame(width: 560, height: 600)
         }
+        .sheet(isPresented: $vm.showFilingSheet, onDismiss: { vm.refreshStats() }) {
+            AttachmentFilingSheet(
+                email: vm.sampleParsedEmail,
+                onClose: {
+                    vm.refreshStats()
+                    vm.showFilingSheet = false
+                }
+            )
+            .frame(width: 600, height: 560)
+        }
         .fileImporter(
             isPresented: $vm.showEMLImporter,
             allowedContentTypes: [UTType(filenameExtension: "eml") ?? .emailMessage, .data],
@@ -198,25 +254,41 @@ struct HostDashboardView: View {
                 vm.loadEMLFile(from: first)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: AIProviderStore.didChangeNotification)) { _ in
+            vm.refreshStats()
+        }
     }
 
     private var sidebar: some View {
         List {
             Section("扩展运行状态") {
-                LabeledContent("GCP 项目") {
-                    if vm.projectID.isEmpty {
-                        Text("未配置")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text(vm.projectID)
+                LabeledContent("当前 AI 服务商") {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(vm.activeProfile.name)
+                            .font(.caption.weight(.medium))
+                        Text(vm.activeProfile.kind.displayName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if vm.activeProfile.kind == .vertexAI {
+                    LabeledContent("GCP 项目") {
+                        if vm.activeProfile.projectID.isEmpty {
+                            Text("未配置")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text(vm.activeProfile.projectID)
+                                .font(.caption.monospaced())
+                        }
+                    }
+                    LabeledContent("Endpoint 区域") {
+                        Text("locations/\(vm.activeProfile.location)")
                             .font(.caption.monospaced())
                     }
                 }
-                LabeledContent("Endpoint 区域") {
-                    Text("locations/\(GeminiModel.vertexLocation)")
-                        .font(.caption.monospaced())
-                }
+
                 LabeledContent("Keychain 凭据") {
                     if let masked = vm.maskedKeyStatus {
                         Text(masked)
@@ -228,24 +300,39 @@ struct HostDashboardView: View {
                             .foregroundStyle(.orange)
                     }
                 }
+
+                LabeledContent("归档工作区") {
+                    if let path = vm.workspacePath {
+                        Text((path as NSString).abbreviatingWithTildeInPath)
+                            .font(.caption.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(path)
+                    } else {
+                        Text("未授权")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 LabeledContent("本地缓存") {
                     Text("\(vm.cacheCount) 封 · \(vm.cacheSizeText)")
                         .font(.caption)
                 }
             }
 
-            Section("默认模型切换") {
-                Picker("默认模型", selection: Binding(
-                    get: { vm.preferredModel },
-                    set: { vm.selectDefaultModel($0) }
+            Section("默认模型档位") {
+                Picker("默认模型档位", selection: Binding(
+                    get: { vm.preferredTier },
+                    set: { vm.selectDefaultTier($0) }
                 )) {
-                    ForEach(GeminiModel.allCases) { model in
-                        Text("\(model.shortLabel)").tag(model)
+                    ForEach(AIModelTier.allCases) { tier in
+                        Text(tier.shortLabel).tag(tier)
                     }
                 }
                 .pickerStyle(.segmented)
 
-                Text(vm.preferredModel.subtitle)
+                Text("\(vm.preferredTier.subtitle) · \(vm.activeProfile.modelName(for: vm.preferredTier))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -254,13 +341,19 @@ struct HostDashboardView: View {
                 Button {
                     vm.showKeychainSheet = true
                 } label: {
-                    Label("配置 Keychain API Key", systemImage: "key.fill")
+                    Label("配置 AI 服务商与凭据", systemImage: "key.fill")
                 }
 
                 Button {
-                    Task { await vm.verifyBothModels() }
+                    vm.chooseWorkspaceDirectory()
                 } label: {
-                    Label(vm.isCheckingConnection ? "正在校验…" : "零成本测试双模型", systemImage: "checkmark.seal")
+                    Label("选择附件归档目录…", systemImage: "folder.badge.plus")
+                }
+
+                Button {
+                    Task { await vm.verifyActiveProvider() }
+                } label: {
+                    Label(vm.isCheckingConnection ? "正在校验…" : "测试当前 AI 连通性", systemImage: "checkmark.seal")
                 }
                 .disabled(vm.isCheckingConnection)
 
@@ -293,7 +386,7 @@ struct HostDashboardView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Apple Mail AI 扩展控制台")
                         .font(.title2.bold())
-                    Text("MailKit 原生扩展：阅读顶部横幅「AI 汇总分析」+ 写信工具栏「AI 双语回复助手」。邮件原文透传不加密、不篡改。")
+                    Text("MailKit 原生扩展：阅读顶部横幅「AI 汇总分析」（SSE 流式呈现 + 历史报价参考 + 附件智能归档）+ 写信工具栏「AI 双语回复助手」。邮件原文透传不加密、不篡改。")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -312,7 +405,7 @@ struct HostDashboardView: View {
                         Text("1. 打开系统 **邮件 (Mail.app)** → 菜单栏 **邮件 → 设置… (⌘,)** → **扩展**。")
                         Text("2. 在左侧勾选启用 **AI 邮件汇总与双语回复**。")
                         Text("3. 点开任意邮件，顶部横幅即显示「**AI 汇总分析**」按钮；点写信窗口工具栏扩展图标即可使用双语回复草稿。")
-                        Text("4. 本扩展使用 `com.apple.security.network.client` 沙盒网络权限直连 Vertex AI `locations/global`，API Key 仅由 macOS Keychain 读取。")
+                        Text("4. 支持 **Vertex AI / Gemini API Studio / OpenAI 兼容接口 / Anthropic Claude**，API Key 仅由 macOS Keychain 读取；附件归档仅在授权工作区目录并点击确认后写入，绝不覆盖现有文件。")
                     }
                     .font(.callout)
                     .padding(6)
@@ -360,6 +453,13 @@ struct HostDashboardView: View {
                                 vm.showComposeSheet = true
                             } label: {
                                 Label("预览「AI 双语回复」面板", systemImage: "square.and.pencil")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button {
+                                vm.showFilingSheet = true
+                            } label: {
+                                Label("预览「附件智能归档」面板", systemImage: "folder.badge.plus")
                             }
                             .buttonStyle(.bordered)
                         }

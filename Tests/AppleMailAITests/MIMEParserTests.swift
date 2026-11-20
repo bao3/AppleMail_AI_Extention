@@ -197,4 +197,40 @@ final class MIMEParserTests: XCTestCase {
         let decodedWarmed = warmedHandler.decodedMessage(forMessageData: rawData)
         XCTAssertEqual(decodedWarmed?.banner?.title, "AI 邮件助手 · 本地已提取正文 · 已缓存")
     }
+
+    func testSecurityHandlerStoresRawDataOnlyForNonInlineAttachments() {
+        RawEmailDataStore.shared.clearAll()
+
+        let noAttachmentEML = Data("""
+        Message-ID: <no-att-raw-store@example.com>
+        Subject: Plain text only
+        Content-Type: text/plain; charset="UTF-8"
+
+        No attachments here.
+        """.utf8)
+        XCTAssertNotNil(MessageSecurityHandler.shared.decodedMessage(forMessageData: noAttachmentEML))
+        XCTAssertNil(RawEmailDataStore.shared.lookup(messageID: "no-att-raw-store@example.com"))
+
+        let withAttachmentEML = Data("""
+        Message-ID: <with-att-raw-store@example.com>
+        Subject: Attachment Mail
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary="ATTB"
+
+        --ATTB
+        Content-Type: text/plain; charset="UTF-8"
+
+        Please see attached spec.
+        --ATTB
+        Content-Type: application/pdf; name="spec.pdf"
+        Content-Disposition: attachment; filename="spec.pdf"
+        Content-Transfer-Encoding: base64
+
+        JVBERi0xLjQK
+        --ATTB--
+        """.utf8)
+        XCTAssertNotNil(MessageSecurityHandler.shared.decodedMessage(forMessageData: withAttachmentEML))
+        XCTAssertEqual(RawEmailDataStore.shared.lookup(messageID: "with-att-raw-store@example.com"), withAttachmentEML)
+        RawEmailDataStore.shared.clearAll()
+    }
 }

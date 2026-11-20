@@ -178,6 +178,126 @@ public struct MailModelMenuButton: View {
     }
 }
 
+/// Compact native Mail-style provider & tier switcher menu chip (`AIProviderProfile` + `AIModelTier`).
+public struct MailAIModelTierMenuButton: View {
+    @Binding public var selectedTier: AIModelTier
+    @Binding public var activeProfileID: String
+    public let profiles: [AIProviderProfile]
+    public var onSelectTier: ((AIModelTier) -> Void)?
+    public var onSelectProfile: ((AIProviderProfile) -> Void)?
+
+    public init(
+        selectedTier: Binding<AIModelTier>,
+        activeProfileID: Binding<String>,
+        profiles: [AIProviderProfile],
+        onSelectTier: ((AIModelTier) -> Void)? = nil,
+        onSelectProfile: ((AIProviderProfile) -> Void)? = nil
+    ) {
+        _selectedTier = selectedTier
+        _activeProfileID = activeProfileID
+        self.profiles = profiles
+        self.onSelectTier = onSelectTier
+        self.onSelectProfile = onSelectProfile
+    }
+
+    private var activeProfile: AIProviderProfile? {
+        profiles.first(where: { $0.id == activeProfileID }) ?? profiles.first
+    }
+
+    private var chipTitle: String {
+        let tierLabel = selectedTier == .fast ? "极速" : "深度"
+        if profiles.count > 1, let profile = activeProfile {
+            return "\(profile.name) · \(tierLabel)"
+        }
+        if let profile = activeProfile {
+            return "\(tierLabel) · \(shortModelName(profile.modelName(for: selectedTier)))"
+        }
+        return selectedTier.displayName
+    }
+
+    private var helpText: String {
+        if let profile = activeProfile {
+            return "当前服务商：\(profile.name)\n模型：\(profile.modelName(for: selectedTier))"
+        }
+        return "切换 AI 模型档位与服务商"
+    }
+
+    public var body: some View {
+        Menu {
+            Section(activeProfile.map { "模型档位（\($0.name)）" } ?? "模型档位") {
+                ForEach(AIModelTier.allCases) { tier in
+                    Button {
+                        selectedTier = tier
+                        onSelectTier?(tier)
+                    } label: {
+                        HStack {
+                            let modelSuffix = activeProfile.map { " · \($0.modelName(for: tier))" } ?? ""
+                            Text("\(tier.displayName)\(modelSuffix)")
+                            if tier == selectedTier {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !profiles.isEmpty {
+                Divider()
+                Section("切换 AI 服务商") {
+                    ForEach(profiles) { profile in
+                        Button {
+                            activeProfileID = profile.id
+                            onSelectProfile?(profile)
+                        } label: {
+                            HStack {
+                                Text("\(profile.name) · \(profile.kind.displayName)")
+                                if profile.id == activeProfileID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: selectedTier == .fast ? "bolt.fill" : "cpu")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(chipTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: 180)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.06))
+            .overlay(
+                Capsule()
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 0.5)
+            )
+            .clipShape(Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help(helpText)
+    }
+
+    private func shortModelName(_ model: String) -> String {
+        if model == GeminiModel.flash38.rawValue { return "Flash 3.8" }
+        if model == GeminiModel.carbon4.rawValue { return "Carbon 4" }
+        if let tail = model.split(separator: "/").last {
+            return String(tail)
+        }
+        return model
+    }
+}
+
 /// Borderless hover-highlighted toolbar icon button matching Apple Mail's header actions.
 public struct MailIconActionButton: View {
     private let systemImage: String

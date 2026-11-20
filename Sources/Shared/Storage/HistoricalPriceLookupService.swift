@@ -425,6 +425,13 @@ public final class HistoricalPriceLookupService: Sendable {
         return nil
     }
 
+    private static func realUserHomeDirectoryPath() -> String? {
+        guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else {
+            return nil
+        }
+        return String(cString: dir)
+    }
+
     private static func defaultRuntimeOutlookDBPath() -> String {
         if let envDir = ProcessInfo.processInfo.environment["MOXA_KB_RUNTIME_DIR"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -436,11 +443,30 @@ public final class HistoricalPriceLookupService: Sendable {
                 .standardizedFileURL.path
         }
 
-        return FileManager.default.homeDirectoryForCurrentUser
+        let containerOrHomeCandidate = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache", isDirectory: true)
             .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
             .appendingPathComponent("outlook.sqlite", isDirectory: false)
             .standardizedFileURL.path
+        if FileManager.default.isReadableFile(atPath: containerOrHomeCandidate) {
+            return containerOrHomeCandidate
+        }
+
+        // Inside macOS App Sandbox, homeDirectoryForCurrentUser points to the container Data folder,
+        // whereas com.apple.security.temporary-exception.files.home-relative-path.read-only grants
+        // read access to ~/.cache/moxa-kb-runtime/ in the real user home directory.
+        if let realHome = realUserHomeDirectoryPath() {
+            let realCandidate = URL(fileURLWithPath: realHome, isDirectory: true)
+                .appendingPathComponent(".cache", isDirectory: true)
+                .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
+                .appendingPathComponent("outlook.sqlite", isDirectory: false)
+                .standardizedFileURL.path
+            if FileManager.default.isReadableFile(atPath: realCandidate) {
+                return realCandidate
+            }
+        }
+
+        return containerOrHomeCandidate
     }
 
     private static func resolvedStagingDir(override: URL?) -> URL? {

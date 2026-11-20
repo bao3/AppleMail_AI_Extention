@@ -133,7 +133,7 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
             do {
                 let analysis = try await BackgroundAnalysisCoordinator.shared.analyzeIfNeeded(
                     email: parsed,
-                    model: .flash38
+                    tier: .fast
                 )
                 if ExtensionOpsConfig.isAutoFlagMoxaPrimaryEnabled,
                    let mailFlag = analysis.resolvedFlag.mailKitFlag
@@ -161,9 +161,13 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
     // MARK: - Helpers
 
     private nonisolated func hasConfiguredCredentials() -> Bool {
-        guard KeychainStore.shared.hasAPIKey() else { return false }
-        let projectID = KeychainStore.shared.loadProjectID().trimmingCharacters(in: .whitespacesAndNewlines)
-        return !projectID.isEmpty
+        let profile = AIProviderStore.shared.activeProfile
+        guard KeychainStore.shared.hasAPIKey(forProfileID: profile.id) else { return false }
+        if profile.kind.requiresProjectID {
+            let projectID = profile.projectID.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !projectID.isEmpty
+        }
+        return true
     }
 
     private nonisolated func headerMessageID(from message: MEMessage) -> String? {

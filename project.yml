@@ -41,6 +41,7 @@ targets:
       - sdk: Security.framework
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
+      - sdk: libsqlite3.tbd
   MailAIExtension:
     type: app-extension
     platform: macOS
@@ -64,6 +65,7 @@ targets:
       - sdk: Security.framework
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
+      - sdk: libsqlite3.tbd
   AppleMailAITests:
     type: bundle.unit-test
     platform: macOS
@@ -85,6 +87,7 @@ targets:
       - sdk: Security.framework
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
+      - sdk: libsqlite3.tbd
 schemes:
   AppleMailAI:
     build:

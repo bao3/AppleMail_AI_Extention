@@ -3,12 +3,17 @@ import SwiftUI
 
 @MainActor
 final class EmailAnalysisViewModel: ObservableObject {
-    @Published var selectedModel: GeminiModel
+    @Published var activeProfile: AIProviderProfile
+    @Published var profiles: [AIProviderProfile]
+    @Published var selectedTier: AIModelTier
     @Published var analysis: EmailAIAnalysis?
+    @Published var partialSnapshot: PartialAnalysisSnapshot?
+    @Published var priceGroups: [SKUPriceComparisonGroup] = []
+    @Published var isLoadingPrices = false
     @Published var isFromCache = false
     @Published var isLoading = false
     @Published var errorMessage: String?
-    @Published var hasAPIKey: Bool
+    @Published var hasCredentials: Bool
     @Published var copiedToast: String?
     @Published var addedReminderKeys: Set<String>
     @Published var addingTodoIDs: Set<String> = []
@@ -18,36 +23,59 @@ final class EmailAnalysisViewModel: ObservableObject {
 
     private let cacheStore: AnalysisCacheStore
     private let keychainStore: KeychainStore
-    private let client: VertexGeminiClient
+    private let providerStore: AIProviderStore
+    private let aiClient: AIServiceClient
     private let reminderService: ReminderService
+    private let priceService: HistoricalPriceLookupService
+    private var priceLookupTask: Task<Void, Never>?
 
     init(
         email: ParsedEmailContext,
         cacheStore: AnalysisCacheStore = .shared,
         keychainStore: KeychainStore = .shared,
-        client: VertexGeminiClient = .shared,
-        reminderService: ReminderService = .shared
+        providerStore: AIProviderStore = .shared,
+        aiClient: AIServiceClient = .shared,
+        reminderService: ReminderService = .shared,
+        priceService: HistoricalPriceLookupService = .shared
     ) {
         self.email = email
         self.cacheStore = cacheStore
         self.keychainStore = keychainStore
-        self.client = client
+        self.providerStore = providerStore
+        self.aiClient = aiClient
         self.reminderService = reminderService
-        self.selectedModel = keychainStore.loadPreferredModel()
-        self.hasAPIKey = keychainStore.hasAPIKey()
+        self.priceService = priceService
+
+        let currentProfile = providerStore.activeProfile
+        self.activeProfile = currentProfile
+        self.profiles = providerStore.profiles
+        self.selectedTier = providerStore.preferredTier
+        self.hasCredentials = Self.checkCredentials(profile: currentProfile, keychainStore: keychainStore)
         self.addedReminderKeys = reminderService.loadAddedKeys()
     }
 
+    var targetModelName: String {
+        activeProfile.modelName(for: selectedTier)
+    }
+
+    func refreshProviderState() {
+        let currentProfile = providerStore.activeProfile
+        activeProfile = currentProfile
+        profiles = providerStore.profiles
+        selectedTier = providerStore.preferredTier
+        hasCredentials = Self.checkCredentials(profile: currentProfile, keychainStore: keychainStore)
+    }
+
     func loadInitial() async {
-        hasAPIKey = keychainStore.hasAPIKey()
+        refreshProviderState()
         addedReminderKeys = reminderService.loadAddedKeys()
+        triggerPriceLookup(analysis: nil)
 
         if let cached = cacheStore.load(forMessageID: email.messageID) {
             analysis = cached
             isFromCache = true
-            if let cachedModel = GeminiModel(rawValue: cached.modelUsed) {
-                selectedModel = cachedModel
-            }
+            syncTierIfMatchingCurrentProfile(modelUsed: cached.modelUsed)
+            triggerPriceLookup(analysis: cached)
             return
         }
 
@@ -58,56 +86,109 @@ final class EmailAnalysisViewModel: ObservableObject {
             if let result {
                 analysis = result
                 isFromCache = true
-                if let cachedModel = GeminiModel(rawValue: result.modelUsed) {
-                    selectedModel = cachedModel
-                }
+                syncTierIfMatchingCurrentProfile(modelUsed: result.modelUsed)
+                triggerPriceLookup(analysis: result)
                 return
             }
             if let cached = cacheStore.load(forMessageID: email.messageID) {
                 analysis = cached
                 isFromCache = true
-                if let cachedModel = GeminiModel(rawValue: cached.modelUsed) {
-                    selectedModel = cachedModel
-                }
+                syncTierIfMatchingCurrentProfile(modelUsed: cached.modelUsed)
+                triggerPriceLookup(analysis: cached)
                 return
             }
         }
 
-        if hasAPIKey {
+        if hasCredentials {
             await analyze(forceRefresh: false)
         }
     }
 
-    func selectModel(_ model: GeminiModel) {
-        selectedModel = model
-        keychainStore.savePreferredModel(model)
+    func selectTier(_ tier: AIModelTier) {
+        selectedTier = tier
+        providerStore.setPreferredTier(tier)
+    }
+
+    func selectProfile(_ profile: AIProviderProfile) {
+        providerStore.setActiveProfile(id: profile.id)
+        refreshProviderState()
     }
 
     func analyze(forceRefresh: Bool) async {
-        hasAPIKey = keychainStore.hasAPIKey()
-        guard let apiKey = keychainStore.loadAPIKey() else {
-            errorMessage = VertexGeminiError.missingAPIKey.errorDescription
+        refreshProviderState()
+
+        guard let apiKey = keychainStore.loadAPIKey(forProfileID: activeProfile.id), !apiKey.isEmpty else {
+            errorMessage = AIServiceError.missingAPIKey(providerName: activeProfile.name).errorDescription
+            return
+        }
+        if activeProfile.kind.requiresProjectID,
+           activeProfile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            errorMessage = AIServiceError.missingProjectID.errorDescription
             return
         }
 
         if !forceRefresh, let cached = cacheStore.load(forMessageID: email.messageID) {
             analysis = cached
             isFromCache = true
+            partialSnapshot = nil
+            triggerPriceLookup(analysis: cached)
             return
         }
 
         isLoading = true
         errorMessage = nil
+        partialSnapshot = nil
         defer { isLoading = false }
 
+        let profileSnapshot = activeProfile
+        let tierSnapshot = selectedTier
+
         do {
-            let result = try await client.analyzeEmail(email, model: selectedModel, apiKey: apiKey)
+            let result = try await aiClient.analyzeEmail(
+                email,
+                profile: profileSnapshot,
+                tier: tierSnapshot,
+                apiKeyOverride: apiKey
+            ) { [weak self] snapshot in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isLoading else { return }
+                    self.partialSnapshot = snapshot
+                }
+            }
             try cacheStore.save(result, forMessageID: email.messageID)
             analysis = result
+            partialSnapshot = nil
             isFromCache = false
+            triggerPriceLookup(analysis: result)
         } catch {
+            partialSnapshot = nil
             errorMessage = error.localizedDescription
         }
+    }
+
+    func triggerPriceLookup(analysis: EmailAIAnalysis?) {
+        priceLookupTask?.cancel()
+        let currentEmail = email
+        let lookupService = priceService
+        isLoadingPrices = true
+        priceLookupTask = Task { [weak self] in
+            let groups = await lookupService.lookupRelatedPrices(
+                for: currentEmail,
+                analysis: analysis
+            )
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.priceGroups = groups
+                self.isLoadingPrices = false
+            }
+        }
+    }
+
+    func cancelBackgroundTasks() {
+        priceLookupTask?.cancel()
+        priceLookupTask = nil
     }
 
     func isReminderAdded(_ todo: EmailTodoItem) -> Bool {
@@ -149,6 +230,28 @@ final class EmailAnalysisViewModel: ObservableObject {
         copyToPasteboard(text, toast: "已复制\(label)")
     }
 
+    // MARK: - Private
+
+    private static func checkCredentials(profile: AIProviderProfile, keychainStore: KeychainStore) -> Bool {
+        guard keychainStore.hasAPIKey(forProfileID: profile.id) else {
+            return false
+        }
+        if profile.kind.requiresProjectID {
+            return !profile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return true
+    }
+
+    private func syncTierIfMatchingCurrentProfile(modelUsed: String) {
+        let normalized = modelUsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        if normalized == activeProfile.deepModel {
+            selectedTier = .deep
+        } else if normalized == activeProfile.fastModel {
+            selectedTier = .fast
+        }
+    }
+
     private func copyToPasteboard(_ text: String, toast: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -169,6 +272,8 @@ final class EmailAnalysisViewModel: ObservableObject {
 public struct EmailAnalysisPanelView: View {
     @StateObject private var vm: EmailAnalysisViewModel
     @State private var showKeychainSheet = false
+    @State private var showAttachmentFilingSheet = false
+    @State private var filingFocusFilename: String?
     @State private var showRawLocalExtraction = false
 
     public init(email: ParsedEmailContext) {
@@ -180,13 +285,24 @@ public struct EmailAnalysisPanelView: View {
             if showKeychainSheet {
                 KeychainSettingsSheet(
                     onSavedKey: {
+                        vm.refreshProviderState()
                         showKeychainSheet = false
                         Task {
                             await vm.analyze(forceRefresh: false)
                         }
                     },
                     onClose: {
+                        vm.refreshProviderState()
                         showKeychainSheet = false
+                    }
+                )
+            } else if showAttachmentFilingSheet {
+                AttachmentFilingSheet(
+                    email: vm.email,
+                    analysis: vm.analysis,
+                    preselectedFilename: filingFocusFilename,
+                    onClose: {
+                        showAttachmentFilingSheet = false
                     }
                 )
             } else {
@@ -194,7 +310,7 @@ public struct EmailAnalysisPanelView: View {
                     inspectorHeader
                     Divider().opacity(0.6)
                     contentBody
-                    if let analysis = vm.analysis {
+                    if let analysis = vm.analysis, !(vm.isLoading && vm.partialSnapshot?.isEmpty == false) {
                         Divider().opacity(0.6)
                         compactFooter(analysis)
                     }
@@ -206,9 +322,30 @@ public struct EmailAnalysisPanelView: View {
         .task {
             await vm.loadInitial()
         }
+        .onReceive(NotificationCenter.default.publisher(for: AIProviderStore.didChangeNotification)) { _ in
+            vm.refreshProviderState()
+        }
+        .onDisappear {
+            vm.cancelBackgroundTasks()
+        }
     }
 
     // MARK: - Inspector Header
+
+    private var activeFlagForHeader: (flag: MailFlagCategory, reason: String?) {
+        if vm.isLoading,
+           let partial = vm.partialSnapshot,
+           let rawFlag = partial.suggestedFlag?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           let parsedFlag = MailFlagCategory(rawValue: rawFlag),
+           parsedFlag != .none
+        {
+            return (parsedFlag, partial.flagReason)
+        }
+        if let analysis = vm.analysis {
+            return (analysis.resolvedFlag, analysis.flagReason)
+        }
+        return (.none, nil)
+    }
 
     private var inspectorHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -221,12 +358,29 @@ public struct EmailAnalysisPanelView: View {
                 Spacer(minLength: 8)
 
                 HStack(spacing: 4) {
-                    MailModelMenuButton(selection: Binding(
-                        get: { vm.selectedModel },
-                        set: { vm.selectModel($0) }
-                    ))
+                    MailAIModelTierMenuButton(
+                        selectedTier: Binding(
+                            get: { vm.selectedTier },
+                            set: { vm.selectTier($0) }
+                        ),
+                        activeProfileID: Binding(
+                            get: { vm.activeProfile.id },
+                            set: { id in
+                                if let match = vm.profiles.first(where: { $0.id == id }) {
+                                    vm.selectProfile(match)
+                                }
+                            }
+                        ),
+                        profiles: vm.profiles,
+                        onSelectTier: { tier in
+                            vm.selectTier(tier)
+                        },
+                        onSelectProfile: { profile in
+                            vm.selectProfile(profile)
+                        }
+                    )
 
-                    if let current = vm.analysis, current.modelUsed != vm.selectedModel.rawValue {
+                    if let current = vm.analysis, current.modelUsed != vm.targetModelName {
                         Button("重跑") {
                             Task { await vm.analyze(forceRefresh: true) }
                         }
@@ -253,7 +407,7 @@ public struct EmailAnalysisPanelView: View {
 
                     MailIconActionButton(
                         systemImage: "gearshape",
-                        helpText: "凭据与自动化设置"
+                        helpText: "AI 服务商、工作区与自动化设置"
                     ) {
                         showKeychainSheet = true
                     }
@@ -273,8 +427,9 @@ public struct EmailAnalysisPanelView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if let analysis = vm.analysis, analysis.resolvedFlag != .none {
-                    MailFlagBadge(flag: analysis.resolvedFlag, reason: analysis.flagReason)
+                let headerFlag = activeFlagForHeader
+                if headerFlag.flag != .none {
+                    MailFlagBadge(flag: headerFlag.flag, reason: headerFlag.reason)
                 }
 
                 Spacer(minLength: 8)
@@ -284,6 +439,10 @@ public struct EmailAnalysisPanelView: View {
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(.green)
                         .lineLimit(1)
+                } else if vm.isLoading {
+                    Text("流式生成中")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
                 } else if vm.analysis != nil {
                     Text(vm.isFromCache ? "已缓存" : "实时")
                         .font(.system(size: 10.5))
@@ -299,20 +458,32 @@ public struct EmailAnalysisPanelView: View {
 
     @ViewBuilder
     private var contentBody: some View {
-        if vm.isLoading && vm.analysis == nil {
-            VStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.regular)
-                Text("正在摘要分析（\(vm.selectedModel.displayName)）…")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.secondary)
-                Text("已提取正文 \(vm.email.plainBody.count) 字 · 引用 \(vm.email.quotedChain.count) 段 · 附件 \(vm.email.attachments.count) 个")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+        if vm.isLoading, let partial = vm.partialSnapshot, !partial.isEmpty {
+            streamingScrollContent(partial)
+        } else if vm.isLoading && vm.analysis == nil {
+            VStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.regular)
+                    Text("正在摘要分析（\(vm.activeProfile.name) · \(vm.targetModelName)）…")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("已提取正文 \(vm.email.plainBody.count) 字 · 引用 \(vm.email.quotedChain.count) 段 · 附件 \(vm.email.attachments.count) 个")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.top, 24)
+
+                if !vm.priceGroups.isEmpty {
+                    ScrollView {
+                        historicalPricesSection(vm.priceGroups)
+                            .padding(.horizontal, 12)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
-        } else if !vm.hasAPIKey && vm.analysis == nil {
+        } else if !vm.hasCredentials && vm.analysis == nil {
             missingKeyPlaceholder
         } else if let error = vm.errorMessage, vm.analysis == nil {
             errorPlaceholder(error)
@@ -320,17 +491,7 @@ public struct EmailAnalysisPanelView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     if vm.isLoading {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("正在使用 \(vm.selectedModel.displayName) 重新分析…")
-                                .font(.system(size: 11.5))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        streamingBanner
                     }
 
                     if let error = vm.errorMessage {
@@ -341,6 +502,10 @@ public struct EmailAnalysisPanelView: View {
 
                     if !analysis.todos.isEmpty {
                         todosSection(analysis.todos)
+                    }
+
+                    if !vm.priceGroups.isEmpty {
+                        historicalPricesSection(vm.priceGroups)
                     }
 
                     if !analysis.businessElements.isEmpty {
@@ -368,13 +533,97 @@ public struct EmailAnalysisPanelView: View {
                 Text("已本地提取邮件正文与附件信息")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
-                Button("开始 AI 摘要分析") {
-                    Task { await vm.analyze(forceRefresh: false) }
+                HStack(spacing: 8) {
+                    Button("开始 AI 摘要分析") {
+                        Task { await vm.analyze(forceRefresh: false) }
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    if !vm.email.nonInlineAttachments.isEmpty {
+                        Button("整理归档附件…") {
+                            filingFocusFilename = nil
+                            showAttachmentFilingSheet = true
+                        }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
+                if !vm.priceGroups.isEmpty {
+                    ScrollView {
+                        historicalPricesSection(vm.priceGroups)
+                            .padding(.top, 8)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding()
+        }
+    }
+
+    private var streamingBanner: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("正在流式接收 \(vm.activeProfile.name)（\(vm.targetModelName)）分析结果…")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.04))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func streamingScrollContent(_ partial: PartialAnalysisSnapshot) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                streamingBanner
+
+                if partial.headline != nil || !partial.coreConclusions.isEmpty {
+                    MailSectionContainer(title: "摘要结论（流式生成）", systemImage: "sparkles") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            if let headline = partial.headline, !headline.isEmpty {
+                                MailHighlightedText(
+                                    headline,
+                                    fontSize: 13.5,
+                                    baseWeight: .semibold,
+                                    lineSpacing: 2
+                                )
+                            }
+
+                            if !partial.coreConclusions.isEmpty {
+                                Divider().opacity(0.6)
+
+                                VStack(alignment: .leading, spacing: 5) {
+                                    ForEach(Array(partial.coreConclusions.enumerated()), id: \.offset) { _, item in
+                                        HStack(alignment: .top, spacing: 7) {
+                                            Circle()
+                                                .fill(Color.secondary.opacity(0.65))
+                                                .frame(width: 4.5, height: 4.5)
+                                                .padding(.top, 5.5)
+                                            MailHighlightedText(item, fontSize: 12.5, lineSpacing: 2)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !vm.priceGroups.isEmpty {
+                    historicalPricesSection(vm.priceGroups)
+                }
+
+                if let partialTranslation = partial.plainChineseTranslation,
+                   !partialTranslation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                {
+                    translationSection(partialTranslation)
+                }
+
+                if !vm.email.attachments.isEmpty {
+                    attachmentsSection(vm.email.attachments)
+                }
+            }
+            .padding(12)
         }
     }
 
@@ -405,51 +654,88 @@ public struct EmailAnalysisPanelView: View {
     }
 
     private var missingKeyPlaceholder: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "key.viewfinder")
-                .font(.system(size: 30))
-                .foregroundStyle(.secondary)
-            Text("尚未配置 Vertex AI 凭据")
-                .font(.system(size: 14, weight: .semibold))
-            Text("点击下方按钮填入 GCP Project ID 与 Keychain API Key。")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 340)
-            Button("配置凭据") {
-                showKeychainSheet = true
+        ScrollView {
+            VStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    Image(systemName: "key.viewfinder")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                    Text("尚未配置 AI 服务商凭据")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("当前服务商「\(vm.activeProfile.name)」缺少 Keychain API Key\(vm.activeProfile.kind.requiresProjectID ? " 或 GCP Project ID" : "")。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                    HStack(spacing: 8) {
+                        Button("配置凭据") {
+                            showKeychainSheet = true
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        if !vm.email.nonInlineAttachments.isEmpty {
+                            Button("整理归档附件…") {
+                                filingFocusFilename = nil
+                                showAttachmentFilingSheet = true
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 36)
+
+                if !vm.priceGroups.isEmpty {
+                    historicalPricesSection(vm.priceGroups)
+                }
+                if !vm.email.attachments.isEmpty {
+                    attachmentsSection(vm.email.attachments)
+                }
             }
-            .buttonStyle(.borderedProminent)
+            .padding()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
     }
 
     private func errorPlaceholder(_ message: String) -> some View {
-        VStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 28))
-                .foregroundStyle(.red)
-            Text("分析未能完成")
-                .font(.system(size: 14, weight: .semibold))
-            Text(message)
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-            HStack(spacing: 8) {
-                Button("重试") {
-                    Task { await vm.analyze(forceRefresh: true) }
+        ScrollView {
+            VStack(spacing: 12) {
+                VStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 28))
+                        .foregroundStyle(.red)
+                    Text("分析未能完成")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(message)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 400)
+                    HStack(spacing: 8) {
+                        Button("重试") {
+                            Task { await vm.analyze(forceRefresh: true) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("检查设置") {
+                            showKeychainSheet = true
+                        }
+                        if !vm.email.nonInlineAttachments.isEmpty {
+                            Button("整理归档附件…") {
+                                filingFocusFilename = nil
+                                showAttachmentFilingSheet = true
+                            }
+                        }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                Button("检查设置") {
-                    showKeychainSheet = true
+                .padding(.top, 28)
+
+                if !vm.priceGroups.isEmpty {
+                    historicalPricesSection(vm.priceGroups)
+                }
+                if !vm.email.attachments.isEmpty {
+                    attachmentsSection(vm.email.attachments)
                 }
             }
+            .padding()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
     }
 
     // MARK: - Sections
@@ -457,11 +743,12 @@ public struct EmailAnalysisPanelView: View {
     private func summarySection(_ analysis: EmailAIAnalysis) -> some View {
         MailSectionContainer(title: "摘要结论", systemImage: "sparkles") {
             VStack(alignment: .leading, spacing: 8) {
-                Text(analysis.headline)
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                MailHighlightedText(
+                    analysis.headline,
+                    fontSize: 13.5,
+                    baseWeight: .semibold,
+                    lineSpacing: 2
+                )
 
                 if !analysis.coreConclusions.isEmpty {
                     Divider().opacity(0.6)
@@ -473,11 +760,7 @@ public struct EmailAnalysisPanelView: View {
                                     .fill(Color.secondary.opacity(0.65))
                                     .frame(width: 4.5, height: 4.5)
                                     .padding(.top, 5.5)
-                                Text(item)
-                                    .font(.system(size: 12.5))
-                                    .lineSpacing(2)
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                MailHighlightedText(item, fontSize: 12.5, lineSpacing: 2)
                             }
                         }
                     }
@@ -512,10 +795,7 @@ public struct EmailAnalysisPanelView: View {
                             .frame(width: 6.5, height: 6.5)
 
                         VStack(alignment: .leading, spacing: 2.5) {
-                            Text(todo.task)
-                                .font(.system(size: 13))
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                            MailHighlightedText(todo.task, fontSize: 13)
 
                             HStack(spacing: 8) {
                                 if !todo.owner.isEmpty {
@@ -563,6 +843,153 @@ public struct EmailAnalysisPanelView: View {
         case "low": return .secondary.opacity(0.55)
         default: return .orange
         }
+    }
+
+    private func historicalPricesSection(_ groups: [SKUPriceComparisonGroup]) -> some View {
+        MailSectionContainer(
+            title: "历史报价参考 · Outlook KB",
+            systemImage: "chart.line.uptrend.xyaxis",
+            trailing: {
+                Text("\(groups.count) 个型号")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(groups.enumerated()), id: \.element.id) { gIdx, group in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
+                            Text(group.queriedSKU)
+                                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+                            if let rangeLabel = formatPriceRange(group) {
+                                Text(rangeLabel)
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                            }
+
+                            Spacer(minLength: 4)
+
+                            if let hint = group.currentEmailPriceHint, !hint.isEmpty {
+                                Text("本信：\(hint)")
+                                    .font(.system(size: 10.5))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(group.records.enumerated()), id: \.element.id) { rIdx, record in
+                                historicalPriceRow(record)
+                                if rIdx < group.records.count - 1 {
+                                    Divider().opacity(0.4)
+                                }
+                            }
+                        }
+                    }
+
+                    if gIdx < groups.count - 1 {
+                        Divider().opacity(0.6)
+                    }
+                }
+            }
+        }
+    }
+
+    private func historicalPriceRow(_ record: HistoricalPriceRecord) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2.5) {
+                HStack(spacing: 5) {
+                    Text("\(record.currency) \(Self.formatUnitPrice(record.unitPrice))")
+                        .font(.system(size: 12, weight: .semibold))
+                        .textSelection(.enabled)
+
+                    if !record.taxMode.isEmpty {
+                        Text(record.taxMode)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.055))
+                            .clipShape(Capsule())
+                    }
+
+                    if !record.priceTypeLabel.isEmpty {
+                        Text(record.priceTypeLabel)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.accentColor.opacity(0.11))
+                            .clipShape(Capsule())
+                    }
+
+                    Text(record.isExactSKUMatch ? "精确型号" : "同系列 · \(record.sku)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(record.isExactSKUMatch ? Color.green : Color.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background((record.isExactSKUMatch ? Color.green : Color.orange).opacity(0.12))
+                        .clipShape(Capsule())
+                }
+
+                let metaParts = [
+                    record.customerOrg,
+                    record.projectName,
+                    record.quoteDateISO,
+                    record.quantity.map { "数量 \(Self.formatUnitPrice($0))" }
+                ]
+                .compactMap { $0 }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+                if !metaParts.isEmpty {
+                    Text(metaParts.joined(separator: " · "))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+
+            Spacer(minLength: 6)
+
+            if let jumpURL = record.mailJumpURL {
+                Button {
+                    NSWorkspace.shared.open(jumpURL)
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .help(record.subject.isEmpty ? "在 Apple Mail 中打开原报价邮件" : "打开原邮件：\(record.subject)")
+            }
+        }
+        .padding(.vertical, 4.5)
+    }
+
+    private func formatPriceRange(_ group: SKUPriceComparisonGroup) -> String? {
+        guard let minPrice = group.minUnitPrice, let maxPrice = group.maxUnitPrice else {
+            return nil
+        }
+        let currencyPrefix = group.primaryCurrency.isEmpty ? "" : "\(group.primaryCurrency) "
+        if abs(minPrice - maxPrice) < 0.0001 {
+            return "\(currencyPrefix)\(Self.formatUnitPrice(minPrice))"
+        }
+        return "\(currencyPrefix)\(Self.formatUnitPrice(minPrice)) – \(Self.formatUnitPrice(maxPrice))"
+    }
+
+    private static func formatUnitPrice(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
     }
 
     private func businessSection(_ biz: BusinessElements) -> some View {
@@ -672,11 +1099,7 @@ public struct EmailAnalysisPanelView: View {
                 .help("复制译文")
             }
         ) {
-            Text(translation)
-                .font(.system(size: 12.5))
-                .lineSpacing(3)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+            MailHighlightedText(translation, fontSize: 12.5, lineSpacing: 3)
         }
     }
 
@@ -709,11 +1132,7 @@ public struct EmailAnalysisPanelView: View {
                                         .foregroundStyle(.tertiary)
                                 }
                             }
-                            Text(event.summary)
-                                .font(.system(size: 12.5))
-                                .lineSpacing(1.5)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                            MailHighlightedText(event.summary, fontSize: 12.5, lineSpacing: 1.5)
                         }
                     }
                 }
@@ -722,7 +1141,24 @@ public struct EmailAnalysisPanelView: View {
     }
 
     private func attachmentsSection(_ attachments: [AttachmentSummary]) -> some View {
-        MailSectionContainer(title: "附件 (\(attachments.count))", systemImage: "paperclip") {
+        MailSectionContainer(
+            title: "附件 (\(attachments.count))",
+            systemImage: "paperclip",
+            trailing: {
+                if !vm.email.nonInlineAttachments.isEmpty {
+                    Button {
+                        filingFocusFilename = nil
+                        showAttachmentFilingSheet = true
+                    } label: {
+                        Label("整理归档…", systemImage: "folder.badge.plus")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .controlSize(.mini)
+                    .buttonStyle(.bordered)
+                    .help("提取非内嵌附件并智能推荐归档目录（Dry-Run 预览后确认保存）")
+                }
+            }
+        ) {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(attachments.enumerated()), id: \.element.id) { idx, item in
                     HStack(spacing: 6) {
@@ -737,6 +1173,18 @@ public struct EmailAnalysisPanelView: View {
                         Text("\(item.mimeType) · \(item.formattedSize)")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.tertiary)
+                        if !item.isInline {
+                            Button {
+                                filingFocusFilename = item.filename
+                                showAttachmentFilingSheet = true
+                            } label: {
+                                Image(systemName: "folder.badge.plus")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help("整理归档「\(item.filename)」")
+                        }
                     }
                     .padding(.vertical, 4)
 

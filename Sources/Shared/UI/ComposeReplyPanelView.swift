@@ -19,7 +19,9 @@ public enum ComposeDraftTab: String, CaseIterable, Identifiable {
 
 @MainActor
 final class ComposeReplyViewModel: ObservableObject {
-    @Published var selectedModel: GeminiModel
+    @Published var activeProfile: AIProviderProfile
+    @Published var profiles: [AIProviderProfile]
+    @Published var selectedTier: AIModelTier
     @Published var tone: ComposeReplyTone = .professional
     @Published var userIntent: String = ""
     @Published var manualOriginalContext: String = ""
@@ -27,7 +29,7 @@ final class ComposeReplyViewModel: ObservableObject {
     @Published var draft: ComposeReplyDraft?
     @Published var isGenerating = false
     @Published var errorMessage: String?
-    @Published var hasAPIKey: Bool
+    @Published var hasCredentials: Bool
     @Published var copiedToast: String?
 
     let originalEmail: ParsedEmailContext?
@@ -35,32 +37,47 @@ final class ComposeReplyViewModel: ObservableObject {
     let recipients: [String]
 
     private let keychainStore: KeychainStore
-    private let client: VertexGeminiClient
+    private let providerStore: AIProviderStore
+    private let aiClient: AIServiceClient
 
     init(
         originalEmail: ParsedEmailContext?,
         draftSubject: String,
         recipients: [String],
         keychainStore: KeychainStore = .shared,
-        client: VertexGeminiClient = .shared
+        providerStore: AIProviderStore = .shared,
+        aiClient: AIServiceClient = .shared
     ) {
         self.originalEmail = originalEmail
         self.draftSubject = draftSubject
         self.recipients = recipients
         self.keychainStore = keychainStore
-        self.client = client
-        self.selectedModel = keychainStore.loadPreferredModel()
-        self.hasAPIKey = keychainStore.hasAPIKey()
+        self.providerStore = providerStore
+        self.aiClient = aiClient
+
+        let currentProfile = providerStore.activeProfile
+        self.activeProfile = currentProfile
+        self.profiles = providerStore.profiles
+        self.selectedTier = providerStore.preferredTier
+        self.hasCredentials = Self.checkCredentials(profile: currentProfile, keychainStore: keychainStore)
     }
 
-    func refreshKeyStatus() {
-        hasAPIKey = keychainStore.hasAPIKey()
-        selectedModel = keychainStore.loadPreferredModel()
+    func refreshProviderState() {
+        let currentProfile = providerStore.activeProfile
+        activeProfile = currentProfile
+        profiles = providerStore.profiles
+        selectedTier = providerStore.preferredTier
+        hasCredentials = Self.checkCredentials(profile: currentProfile, keychainStore: keychainStore)
     }
 
-    func selectModel(_ model: GeminiModel) {
-        selectedModel = model
-        keychainStore.savePreferredModel(model)
+    func selectTier(_ tier: AIModelTier) {
+        selectedTier = tier
+        providerStore.setPreferredTier(tier)
+    }
+
+    func selectProfile(_ profile: AIProviderProfile) {
+        providerStore.setActiveProfile(id: profile.id)
+        refreshProviderState()
     }
 
     func applyQuickIntent(_ template: String) {
@@ -72,9 +89,15 @@ final class ComposeReplyViewModel: ObservableObject {
     }
 
     func generate() async {
-        hasAPIKey = keychainStore.hasAPIKey()
-        guard let apiKey = keychainStore.loadAPIKey() else {
-            errorMessage = VertexGeminiError.missingAPIKey.errorDescription
+        refreshProviderState()
+        guard let apiKey = keychainStore.loadAPIKey(forProfileID: activeProfile.id), !apiKey.isEmpty else {
+            errorMessage = AIServiceError.missingAPIKey(providerName: activeProfile.name).errorDescription
+            return
+        }
+        if activeProfile.kind.requiresProjectID,
+           activeProfile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            errorMessage = AIServiceError.missingProjectID.errorDescription
             return
         }
 
@@ -110,14 +133,15 @@ final class ComposeReplyViewModel: ObservableObject {
         }
 
         do {
-            draft = try await client.generateReplyDraft(
+            draft = try await aiClient.generateReplyDraft(
                 originalEmail: contextToUse,
                 draftSubject: draftSubject,
                 recipients: recipients,
                 userIntent: trimmedIntent,
                 tone: tone.rawValue,
-                model: selectedModel,
-                apiKey: apiKey
+                profile: activeProfile,
+                tier: selectedTier,
+                apiKeyOverride: apiKey
             )
         } catch {
             errorMessage = error.localizedDescription
@@ -135,6 +159,16 @@ final class ComposeReplyViewModel: ObservableObject {
                 self.copiedToast = nil
             }
         }
+    }
+
+    private static func checkCredentials(profile: AIProviderProfile, keychainStore: KeychainStore) -> Bool {
+        guard keychainStore.hasAPIKey(forProfileID: profile.id) else {
+            return false
+        }
+        if profile.kind.requiresProjectID {
+            return !profile.projectID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return true
     }
 }
 
@@ -162,11 +196,11 @@ public struct ComposeReplyPanelView: View {
             if showKeychainSheet {
                 KeychainSettingsSheet(
                     onSavedKey: {
-                        vm.refreshKeyStatus()
+                        vm.refreshProviderState()
                         showKeychainSheet = false
                     },
                     onClose: {
-                        vm.refreshKeyStatus()
+                        vm.refreshProviderState()
                         showKeychainSheet = false
                     }
                 )
@@ -207,7 +241,10 @@ public struct ComposeReplyPanelView: View {
         .frame(minWidth: 480, minHeight: 520)
         .background(MailVibrancyBackground())
         .task {
-            vm.refreshKeyStatus()
+            vm.refreshProviderState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AIProviderStore.didChangeNotification)) { _ in
+            vm.refreshProviderState()
         }
     }
 
@@ -228,10 +265,27 @@ public struct ComposeReplyPanelView: View {
 
             Spacer(minLength: 6)
 
-            MailModelMenuButton(selection: Binding(
-                get: { vm.selectedModel },
-                set: { vm.selectModel($0) }
-            ))
+            MailAIModelTierMenuButton(
+                selectedTier: Binding(
+                    get: { vm.selectedTier },
+                    set: { vm.selectTier($0) }
+                ),
+                activeProfileID: Binding(
+                    get: { vm.activeProfile.id },
+                    set: { id in
+                        if let match = vm.profiles.first(where: { $0.id == id }) {
+                            vm.selectProfile(match)
+                        }
+                    }
+                ),
+                profiles: vm.profiles,
+                onSelectTier: { tier in
+                    vm.selectTier(tier)
+                },
+                onSelectProfile: { profile in
+                    vm.selectProfile(profile)
+                }
+            )
 
             Menu {
                 ForEach(ComposeReplyTone.allCases) { tone in
@@ -268,7 +322,7 @@ public struct ComposeReplyPanelView: View {
             .fixedSize()
             .help("选择回复语气")
 
-            MailIconActionButton(systemImage: "gearshape", helpText: "凭据与自动化设置") {
+            MailIconActionButton(systemImage: "gearshape", helpText: "AI 服务商与自动化设置") {
                 showKeychainSheet = true
             }
         }

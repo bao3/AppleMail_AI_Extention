@@ -529,11 +529,17 @@ public final class AttachmentOrganizerService: Sendable {
             candidates = [expanded]
         } else {
             let homeRuntime = (NSString(string: "~/.cache/moxa-kb-runtime/moxa_kb.sqlite")).expandingTildeInPath
+            let realHomeRuntime: String? = {
+                guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else { return nil }
+                return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
+                    .appendingPathComponent(".cache/moxa-kb-runtime/moxa_kb.sqlite", isDirectory: false)
+                    .path
+            }()
             let cachesRuntime = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
                 .first?
                 .appendingPathComponent("moxa-kb-runtime/moxa_kb.sqlite")
                 .path
-            candidates = [homeRuntime, cachesRuntime].compactMap { $0 }
+            candidates = [homeRuntime, realHomeRuntime, cachesRuntime].compactMap { $0 }
         }
 
         for candidate in candidates {

@@ -87,6 +87,9 @@ final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @uncheck
         // Pure local CPU extraction: zero network calls, zero body tampering.
         let parsed = MIMEParser.parse(rawData: data)
         ParsedEmailStore.shared.store(parsed)
+        if !parsed.nonInlineAttachments.isEmpty {
+            RawEmailDataStore.shared.store(rawData: data, forMessageID: parsed.messageID)
+        }
 
         // Keep XPC context payload compact; full parsed context lives in ParsedEmailStore.shared.
         let contextData = makeCompactXPCContextData(for: parsed)
