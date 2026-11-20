@@ -32,19 +32,25 @@ final class KeychainSettingsViewModel: ObservableObject {
         self.providerStore = providerStore
         self.aiClient = aiClient
         self.bookmarkStore = bookmarkStore
+
+        let active = providerStore.activeProfile
+        self.profiles = providerStore.profiles
+        self.activeProfileID = active.id
+        self.editingProfile = active
+        self.selectedTier = providerStore.preferredTier
+        self.maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: active.id)
+        self.workspaceDisplayPath = bookmarkStore.workspaceDisplayPath
         self.autoAnalyzeMoxaPrimary = ExtensionOpsConfig.isAutoAnalyzeMoxaPrimaryEnabled
         self.autoFlagMoxaPrimary = ExtensionOpsConfig.isAutoFlagMoxaPrimaryEnabled
-        refreshState()
     }
 
     func refreshState() {
         profiles = providerStore.profiles
         let active = providerStore.activeProfile
-        activeProfileID = active.id
-        if let match = profiles.first(where: { $0.id == editingProfile.id }) {
-            editingProfile = match
-        } else {
+        if activeProfileID != active.id || !profiles.contains(where: { $0.id == editingProfile.id }) {
+            activeProfileID = active.id
             editingProfile = active
+            apiKeyInput = ""
         }
         selectedTier = providerStore.preferredTier
         maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: editingProfile.id)

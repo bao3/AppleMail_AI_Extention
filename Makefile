@@ -34,9 +34,14 @@ install: build
 	$(MAKE) reset-pluginkit
 
 reset-pluginkit:
-	# Unregister stale DerivedData copies so Apple Mail only ever loads the installed appex
+	# Unregister any stale MailAIExtension.appex registrations (DerivedData / worktrees) other than $(INSTALLED_APPEX)
 	pluginkit -r "$(CURDIR)/$(RELEASE_APP)/Contents/PlugIns/MailAIExtension.appex" 2>/dev/null || true
 	pluginkit -r "$(CURDIR)/$(DEBUG_APP)/Contents/PlugIns/MailAIExtension.appex" 2>/dev/null || true
+	pluginkit -m -v -A -D -i "$(EXT_BUNDLE_ID)" 2>/dev/null | awk -F'\t' '/MailAIExtension\.appex$$/ { print $$NF }' | while IFS= read -r stale_path; do \
+		if [ -n "$$stale_path" ] && [ "$$stale_path" != "$(INSTALLED_APPEX)" ]; then \
+			pluginkit -r "$$stale_path" 2>/dev/null || true; \
+		fi; \
+	done
 	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f -R -trusted "$(INSTALLED_APP)"
 	pluginkit -a "$(INSTALLED_APPEX)" || true
 	pluginkit -m -v -A -D -i "$(EXT_BUNDLE_ID)" || true

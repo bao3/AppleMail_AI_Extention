@@ -646,4 +646,43 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         XCTAssertEqual(result.modelUsed, "gpt-4o-mini")
         XCTAssertNotNil(cache.load(forMessageID: email.messageID))
     }
+
+    @MainActor
+    func testKeychainSettingsViewModelInitializesAndRefreshesActiveNonVertexProfile() throws {
+        let (defaults, suite) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let testService = "com.bao3.AppleMailAI.settings-vm-test.\(UUID().uuidString)"
+        let keychain = KeychainStore(service: testService, userDefaults: defaults)
+        try keychain.saveAPIKey("sk-openai-12345678", forProfileID: "preset-openai")
+        defer {
+            try? keychain.deleteAPIKey(forProfileID: "preset-openai")
+            try? keychain.deleteAPIKey(forProfileID: AIProviderProfile.defaultVertexProfileID)
+        }
+
+        let store = AIProviderStore(userDefaults: defaults, keychainStore: keychain)
+        let openAIPreset = try XCTUnwrap(AIProviderProfile.builtInPresets.first(where: { $0.id == "preset-openai" }))
+        store.upsertProfile(openAIPreset, makeActive: true)
+        XCTAssertEqual(store.activeProfile.id, "preset-openai")
+
+        let aiClient = AIServiceClient(session: makeMockSession(), providerStore: store, keychainStore: keychain)
+        let bookmarkStore = WorkspaceBookmarkStore(userDefaults: defaults)
+        let vm = KeychainSettingsViewModel(
+            keychain: keychain,
+            providerStore: store,
+            aiClient: aiClient,
+            bookmarkStore: bookmarkStore
+        )
+
+        XCTAssertEqual(vm.activeProfileID, "preset-openai")
+        XCTAssertEqual(vm.editingProfile.id, "preset-openai")
+        XCTAssertEqual(vm.editingProfile.kind, .openAICompatible)
+        XCTAssertTrue(vm.maskedKeyStatus?.contains("sk-ope") == true)
+
+        // Unsaved edits must survive .onAppear refreshState() while activeProfileID stays unchanged.
+        vm.editingProfile.fastModel = "gpt-4.1-mini"
+        vm.refreshState()
+        XCTAssertEqual(vm.editingProfile.id, "preset-openai")
+        XCTAssertEqual(vm.editingProfile.fastModel, "gpt-4.1-mini")
+    }
 }
