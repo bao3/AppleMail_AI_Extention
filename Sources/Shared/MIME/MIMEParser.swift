@@ -909,7 +909,14 @@ public enum MIMEParser {
 
             // 3. Header block like "From: ..." followed within 3 lines by "Sent:/Date:" or "发件人:" + "发送时间:"
             if idx > 0 && looksLikeQuotedHeaderBlock(lines: lines, startIndex: idx) {
-                sections.append((trimmed, [line]))
+                let lastSectionIsEmpty = sections.count > 1 && sections[sections.count - 1].lines.allSatisfy {
+                    $0.trimmingCharacters(in: .whitespaces).isEmpty
+                }
+                if lastSectionIsEmpty {
+                    sections[sections.count - 1].lines.append(line)
+                } else {
+                    sections.append((trimmed, [line]))
+                }
                 idx += 1
                 continue
             }
