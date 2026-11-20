@@ -24,6 +24,8 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
     public let isExactSKUMatch: Bool
     public let occurrenceCount: Int
     public let mailJumpURL: URL?
+    public let sourceMessageRowID: Int64?
+    public let mergedMessageRowIDs: [Int64]
 
     public init(
         id: String? = nil,
@@ -43,7 +45,9 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
         confidence: String = "medium",
         isExactSKUMatch: Bool = true,
         occurrenceCount: Int = 1,
-        mailJumpURL: URL? = nil
+        mailJumpURL: URL? = nil,
+        sourceMessageRowID: Int64? = nil,
+        mergedMessageRowIDs: [Int64] = []
     ) {
         self.sku = sku
         self.currency = currency
@@ -62,6 +66,14 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
         self.isExactSKUMatch = isExactSKUMatch
         self.occurrenceCount = max(1, occurrenceCount)
         self.mailJumpURL = mailJumpURL
+        self.sourceMessageRowID = sourceMessageRowID ?? mergedMessageRowIDs.first
+        if !mergedMessageRowIDs.isEmpty {
+            self.mergedMessageRowIDs = mergedMessageRowIDs
+        } else if let sourceMessageRowID {
+            self.mergedMessageRowIDs = [sourceMessageRowID]
+        } else {
+            self.mergedMessageRowIDs = []
+        }
         self.id = id ?? [
             sku.uppercased(),
             currency.uppercased(),
@@ -73,6 +85,133 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
             rfcMessageID,
             isExactSKUMatch ? "exact" : "series"
         ].joined(separator: "|")
+    }
+}
+
+/// Price evidence extracted from a historical email body, HTML table, or attachment spreadsheet.
+public struct HistoricalEmailPriceEvidence: Identifiable, Sendable, Hashable {
+    public let id: String
+    public let sku: String
+    public let currency: String
+    public let unitPrice: Double
+    public let quantity: Double?
+    public let totalAmount: Double?
+    public let priceType: String
+    public let priceTypeLabel: String
+    public let taxMode: String
+    public let customerOrg: String
+    public let projectName: String
+    public let sourceKind: String
+    public let sourceKindLabel: String
+    public let evidenceSnippet: String
+
+    public init(
+        id: String,
+        sku: String,
+        currency: String,
+        unitPrice: Double,
+        quantity: Double? = nil,
+        totalAmount: Double? = nil,
+        priceType: String = "",
+        priceTypeLabel: String? = nil,
+        taxMode: String = "",
+        customerOrg: String = "",
+        projectName: String = "",
+        sourceKind: String = "",
+        sourceKindLabel: String? = nil,
+        evidenceSnippet: String = ""
+    ) {
+        self.id = id
+        self.sku = sku
+        self.currency = currency
+        self.unitPrice = unitPrice
+        self.quantity = quantity
+        self.totalAmount = totalAmount
+        self.priceType = priceType
+        self.priceTypeLabel = priceTypeLabel ?? HistoricalPriceLookupService.priceTypeDisplayLabel(for: priceType)
+        self.taxMode = taxMode
+        self.customerOrg = customerOrg
+        self.projectName = projectName
+        self.sourceKind = sourceKind
+        self.sourceKindLabel = sourceKindLabel ?? HistoricalPriceLookupService.sourceKindDisplayLabel(for: sourceKind)
+        self.evidenceSnippet = evidenceSnippet
+    }
+}
+
+/// Non-inline attachment metadata recorded for a historical message in `outlook.sqlite`.
+public struct HistoricalEmailAttachmentInfo: Identifiable, Sendable, Hashable {
+    public let id: String
+    public let filename: String
+    public let sizeBytes: Int64
+    public let textPreview: String
+
+    public init(id: String, filename: String, sizeBytes: Int64 = 0, textPreview: String = "") {
+        self.id = id
+        self.filename = filename
+        self.sizeBytes = max(0, sizeBytes)
+        self.textPreview = textPreview
+    }
+}
+
+/// Full read-only source email record & extracted price evidence loaded from `outlook.sqlite`.
+public struct HistoricalEmailDetail: Identifiable, Sendable, Hashable {
+    public let id: Int64
+    public let source: String
+    public let sourceLabel: String
+    public let rfcMessageID: String
+    public let subject: String
+    public let sender: String
+    public let recipients: String
+    public let cc: String
+    public let dateISO: String
+    public let folderPath: String
+    public let projectName: String
+    public let customersOrgs: String
+    public let mainMeaning: String
+    public let bodyLatest: String
+    public let bodyQuoted: String
+    public let priceEvidences: [HistoricalEmailPriceEvidence]
+    public let attachments: [HistoricalEmailAttachmentInfo]
+    public let mailJumpURL: URL?
+
+    public init(
+        id: Int64,
+        source: String,
+        sourceLabel: String? = nil,
+        rfcMessageID: String = "",
+        subject: String = "",
+        sender: String = "",
+        recipients: String = "",
+        cc: String = "",
+        dateISO: String = "",
+        folderPath: String = "",
+        projectName: String = "",
+        customersOrgs: String = "",
+        mainMeaning: String = "",
+        bodyLatest: String = "",
+        bodyQuoted: String = "",
+        priceEvidences: [HistoricalEmailPriceEvidence] = [],
+        attachments: [HistoricalEmailAttachmentInfo] = [],
+        mailJumpURL: URL? = nil
+    ) {
+        self.id = id
+        self.source = source
+        self.sourceLabel = sourceLabel ?? HistoricalPriceLookupService.mailSourceDisplayLabel(for: source)
+        self.rfcMessageID = rfcMessageID
+        self.subject = subject
+        self.sender = sender
+        self.recipients = recipients
+        self.cc = cc
+        self.dateISO = dateISO
+        self.folderPath = folderPath
+        self.projectName = projectName
+        self.customersOrgs = customersOrgs
+        self.mainMeaning = mainMeaning
+        self.bodyLatest = bodyLatest
+        self.bodyQuoted = bodyQuoted
+        self.priceEvidences = priceEvidences
+        self.attachments = attachments
+        self.mailJumpURL = mailJumpURL
     }
 }
 
@@ -193,6 +332,47 @@ public final class HistoricalPriceLookupService: Sendable {
         default:
             return rawPriceType
         }
+    }
+
+    public static func sourceKindDisplayLabel(for rawSourceKind: String) -> String {
+        switch rawSourceKind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "mime_attachment":
+            return "附件表格"
+        case "html_table":
+            return "邮件表格"
+        case "body_latest", "body":
+            return "邮件正文"
+        case "body_quoted":
+            return "引用对话"
+        case "":
+            return "邮件提取"
+        default:
+            return rawSourceKind
+        }
+    }
+
+    public static func mailSourceDisplayLabel(for rawSource: String) -> String {
+        let trimmed = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch trimmed.lowercased() {
+        case "apple_mail":
+            return "Apple Mail"
+        case "outlook":
+            return "Outlook"
+        case "thunderbird":
+            return "Thunderbird"
+        case "":
+            return "邮件库"
+        default:
+            return trimmed
+        }
+    }
+
+    public static func formatUnitPrice(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
     }
 
     public static func containsPricingIntent(email: ParsedEmailContext, analysis: EmailAIAnalysis? = nil) -> Bool {
@@ -377,7 +557,9 @@ public final class HistoricalPriceLookupService: Sendable {
                         confidence: record.confidence,
                         isExactSKUMatch: record.isExactSKUMatch,
                         occurrenceCount: record.occurrenceCount,
-                        mailJumpURL: ReminderService.mailMessageURL(forMessageID: record.rfcMessageID)
+                        mailJumpURL: ReminderService.mailMessageURL(forMessageID: record.rfcMessageID),
+                        sourceMessageRowID: record.sourceMessageRowID,
+                        mergedMessageRowIDs: record.mergedMessageRowIDs
                     )
                 }
                 return SKUPriceComparisonGroup(
@@ -388,6 +570,66 @@ public final class HistoricalPriceLookupService: Sendable {
                     maxUnitPrice: group.maxUnitPrice,
                     primaryCurrency: group.primaryCurrency,
                     records: enrichedRecords
+                )
+            }
+        }
+    }
+
+    /// Loads full read-only source emails, extracted price evidence snippets, and attachment metadata
+    /// from the staged `outlook.sqlite` cache so users can inspect historical emails inside the AI panel
+    /// without hitting Apple Mail's modal-window rendering lock.
+    public func loadHistoricalEmailDetails(
+        for record: HistoricalPriceRecord,
+        runtimeDBPath: String? = nil,
+        coldDBURL: URL? = nil,
+        maxMessages: Int = 8
+    ) async -> [HistoricalEmailDetail] {
+        let stagingDir = self.stagingDirectoryURL
+        let cappedMaxMessages = max(1, maxMessages)
+        let rawDetails: [HistoricalEmailDetail] = await Task.detached(priority: .userInitiated) {
+            guard let resolvedPath = Self.resolveReadableRuntimeDBPath(
+                explicitRuntimeDBPath: runtimeDBPath,
+                coldDBURL: coldDBURL,
+                stagingDirectoryURL: stagingDir
+            ),
+            let db = Self.openReadOnlyDatabase(atPath: resolvedPath)
+            else {
+                return []
+            }
+            defer { sqlite3_close(db) }
+
+            return Self.queryHistoricalEmailDetails(
+                db: db,
+                record: record,
+                maxMessages: cappedMaxMessages
+            )
+        }.value
+
+        guard !rawDetails.isEmpty else {
+            return []
+        }
+
+        return await MainActor.run {
+            rawDetails.map { detail in
+                HistoricalEmailDetail(
+                    id: detail.id,
+                    source: detail.source,
+                    sourceLabel: detail.sourceLabel,
+                    rfcMessageID: detail.rfcMessageID,
+                    subject: detail.subject,
+                    sender: detail.sender,
+                    recipients: detail.recipients,
+                    cc: detail.cc,
+                    dateISO: detail.dateISO,
+                    folderPath: detail.folderPath,
+                    projectName: detail.projectName,
+                    customersOrgs: detail.customersOrgs,
+                    mainMeaning: detail.mainMeaning,
+                    bodyLatest: detail.bodyLatest,
+                    bodyQuoted: detail.bodyQuoted,
+                    priceEvidences: detail.priceEvidences,
+                    attachments: detail.attachments,
+                    mailJumpURL: ReminderService.mailMessageURL(forMessageID: detail.rfcMessageID)
                 )
             }
         }
@@ -697,6 +939,7 @@ public final class HistoricalPriceLookupService: Sendable {
     }
 
     private struct RawPriceRow {
+        let messageRowID: Int64
         let sku: String
         let rawCurrency: String
         let currency: String
@@ -723,6 +966,8 @@ public final class HistoricalPriceLookupService: Sendable {
     }
 
     private struct PriceDedupBucket {
+        private static let maxStoredMessageIDs = 12
+
         let priceKey: String
         let groupKey: String
         var sku: String
@@ -733,6 +978,8 @@ public final class HistoricalPriceLookupService: Sendable {
         var taxMode: String
         var orderedCustomers: [String]
         var seenCanonicalCustomers: Set<String>
+        var orderedMessageRowIDs: [Int64]
+        var seenMessageRowIDs: Set<Int64>
         var projectName: String
         var displayTopic: String
         var quoteDateISO: String
@@ -753,6 +1000,8 @@ public final class HistoricalPriceLookupService: Sendable {
             self.taxMode = row.taxMode
             self.orderedCustomers = []
             self.seenCanonicalCustomers = []
+            self.orderedMessageRowIDs = []
+            self.seenMessageRowIDs = []
             self.projectName = row.projectName
             self.displayTopic = row.displayTopic
             self.quoteDateISO = row.quoteDateISO
@@ -762,11 +1011,13 @@ public final class HistoricalPriceLookupService: Sendable {
             self.confidence = row.confidence.isEmpty ? "medium" : row.confidence
             self.occurrenceCount = 1
             appendCustomers(row.customerTokens)
+            appendMessageRowID(row.messageRowID)
         }
 
         mutating func merge(from row: RawPriceRow) {
             occurrenceCount += 1
-            if row.quoteDateISO > quoteDateISO {
+            let isIncomingNewer = row.quoteDateISO > quoteDateISO
+            if isIncomingNewer {
                 quoteDateISO = row.quoteDateISO
                 if !row.subject.isEmpty { subject = row.subject }
                 if !row.rfcMessageID.isEmpty { rfcMessageID = row.rfcMessageID }
@@ -776,6 +1027,7 @@ public final class HistoricalPriceLookupService: Sendable {
                 taxMode = row.taxMode
             }
             appendCustomers(row.customerTokens)
+            appendMessageRowID(row.messageRowID, prioritizeFront: isIncomingNewer)
             if projectName.isEmpty, !row.projectName.isEmpty {
                 projectName = row.projectName
             }
@@ -796,7 +1048,8 @@ public final class HistoricalPriceLookupService: Sendable {
 
         mutating func merge(from incoming: PriceDedupBucket) {
             occurrenceCount += incoming.occurrenceCount
-            if incoming.quoteDateISO > quoteDateISO {
+            let isIncomingNewer = incoming.quoteDateISO > quoteDateISO
+            if isIncomingNewer {
                 quoteDateISO = incoming.quoteDateISO
                 if !incoming.subject.isEmpty { subject = incoming.subject }
                 if !incoming.rfcMessageID.isEmpty { rfcMessageID = incoming.rfcMessageID }
@@ -806,6 +1059,15 @@ public final class HistoricalPriceLookupService: Sendable {
                 taxMode = incoming.taxMode
             }
             appendCustomers(incoming.orderedCustomers)
+            if isIncomingNewer {
+                for rowID in incoming.orderedMessageRowIDs.reversed() {
+                    appendMessageRowID(rowID, prioritizeFront: true)
+                }
+            } else {
+                for rowID in incoming.orderedMessageRowIDs {
+                    appendMessageRowID(rowID)
+                }
+            }
             if projectName.isEmpty, !incoming.projectName.isEmpty {
                 projectName = incoming.projectName
             }
@@ -834,6 +1096,26 @@ public final class HistoricalPriceLookupService: Sendable {
                 if seenCanonicalCustomers.insert(canonical).inserted {
                     orderedCustomers.append(token)
                 }
+            }
+        }
+
+        private mutating func appendMessageRowID(_ rowID: Int64, prioritizeFront: Bool = false) {
+            guard rowID > 0 else { return }
+            if seenMessageRowIDs.insert(rowID).inserted {
+                if prioritizeFront {
+                    orderedMessageRowIDs.insert(rowID, at: 0)
+                    if orderedMessageRowIDs.count > Self.maxStoredMessageIDs {
+                        let dropped = orderedMessageRowIDs.removeLast()
+                        seenMessageRowIDs.remove(dropped)
+                    }
+                } else if orderedMessageRowIDs.count < Self.maxStoredMessageIDs {
+                    orderedMessageRowIDs.append(rowID)
+                } else {
+                    seenMessageRowIDs.remove(rowID)
+                }
+            } else if prioritizeFront, let existingIndex = orderedMessageRowIDs.firstIndex(of: rowID), existingIndex > 0 {
+                orderedMessageRowIDs.remove(at: existingIndex)
+                orderedMessageRowIDs.insert(rowID, at: 0)
             }
         }
 
@@ -874,7 +1156,8 @@ public final class HistoricalPriceLookupService: Sendable {
             m.message_id AS rfc_message_id,
             v.evidence_snippet,
             v.confidence,
-            COALESCE(m.thread_topic, '') AS thread_topic
+            COALESCE(m.thread_topic, '') AS thread_topic,
+            v.message_id AS message_row_id
         FROM v_sku_price_history v
         JOIN messages m ON m.id = v.message_id
         WHERE v.unit_price IS NOT NULL
@@ -907,7 +1190,8 @@ public final class HistoricalPriceLookupService: Sendable {
             m.message_id AS rfc_message_id,
             v.evidence_snippet,
             v.confidence,
-            '' AS thread_topic
+            '' AS thread_topic,
+            v.message_id AS message_row_id
         FROM v_sku_price_history v
         JOIN messages m ON m.id = v.message_id
         WHERE v.unit_price IS NOT NULL
@@ -974,6 +1258,7 @@ public final class HistoricalPriceLookupService: Sendable {
             let evidenceSnippet = columnString(stmt, index: 11).trimmingCharacters(in: .whitespacesAndNewlines)
             let confidence = columnString(stmt, index: 12).trimmingCharacters(in: .whitespacesAndNewlines)
             let threadTopic = columnString(stmt, index: 13).trimmingCharacters(in: .whitespacesAndNewlines)
+            let messageRowID = sqlite3_column_int64(stmt, 14)
 
             let normalizedRFCMessageID = rfcMessageID.lowercased()
             if !normalizedSelfMessageID.isEmpty,
@@ -1001,6 +1286,7 @@ public final class HistoricalPriceLookupService: Sendable {
             let priceKey = "\(sku.uppercased())|\(currency)|\(roundedPrice)"
 
             let row = RawPriceRow(
+                messageRowID: messageRowID,
                 sku: sku,
                 rawCurrency: rawCurrency,
                 currency: currency,
@@ -1167,9 +1453,325 @@ public final class HistoricalPriceLookupService: Sendable {
                 confidence: bucket.confidence,
                 isExactSKUMatch: isExactSKUMatch,
                 occurrenceCount: bucket.occurrenceCount,
-                mailJumpURL: nil
+                mailJumpURL: nil,
+                sourceMessageRowID: bucket.orderedMessageRowIDs.first,
+                mergedMessageRowIDs: bucket.orderedMessageRowIDs
             )
         }
+    }
+
+    // MARK: - Source Email Detail Queries
+
+    private static func queryHistoricalEmailDetails(
+        db: OpaquePointer,
+        record: HistoricalPriceRecord,
+        maxMessages: Int
+    ) -> [HistoricalEmailDetail] {
+        let rowIDs = resolveMessageRowIDs(db: db, record: record, maxMessages: maxMessages)
+        guard !rowIDs.isEmpty else { return [] }
+
+        var details: [HistoricalEmailDetail] = []
+        details.reserveCapacity(rowIDs.count)
+        for rowID in rowIDs {
+            if let detail = querySingleEmailDetail(db: db, messageRowID: rowID, targetSKU: record.sku) {
+                details.append(detail)
+            }
+        }
+        return details
+    }
+
+    private static func resolveMessageRowIDs(
+        db: OpaquePointer,
+        record: HistoricalPriceRecord,
+        maxMessages: Int
+    ) -> [Int64] {
+        var resolved: [Int64] = []
+        var seen: Set<Int64> = []
+
+        func appendRowID(_ id: Int64?) {
+            guard let id, id > 0, resolved.count < maxMessages else { return }
+            if seen.insert(id).inserted {
+                resolved.append(id)
+            }
+        }
+
+        for id in record.mergedMessageRowIDs {
+            appendRowID(id)
+        }
+        appendRowID(record.sourceMessageRowID)
+
+        if resolved.isEmpty {
+            let normalizedID = ParsedEmailContext.normalizeMessageID(record.rfcMessageID)
+            if !normalizedID.isEmpty, !normalizedID.hasPrefix("sha256:") {
+                let sql = """
+                SELECT id
+                FROM messages
+                WHERE LOWER(TRIM(message_id, '<> ')) = LOWER(?1)
+                ORDER BY date_iso DESC, id DESC
+                LIMIT ?2
+                """
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt {
+                    defer { sqlite3_finalize(stmt) }
+                    normalizedID.withCString { cStr in
+                        _ = sqlite3_bind_text(stmt, 1, cStr, -1, sqliteTransient)
+                    }
+                    sqlite3_bind_int(stmt, 2, Int32(maxMessages))
+                    while sqlite3_step(stmt) == SQLITE_ROW {
+                        appendRowID(sqlite3_column_int64(stmt, 0))
+                    }
+                }
+            }
+        }
+
+        return resolved
+    }
+
+    private static func prepareSingleMessageStatement(db: OpaquePointer) -> OpaquePointer? {
+        let primarySQL = """
+        SELECT
+            id,
+            source,
+            message_id,
+            subject,
+            sender,
+            recipients,
+            cc,
+            date_iso,
+            COALESCE(folder_path, '') AS folder_path,
+            project_name,
+            customers_orgs,
+            COALESCE(main_meaning, '') AS main_meaning,
+            body_latest,
+            body_quoted
+        FROM messages
+        WHERE id = ?1
+        LIMIT 1
+        """
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, primarySQL, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            return stmt
+        }
+
+        // Fallback for minimal mock schemas lacking `folder_path` or `main_meaning`.
+        let fallbackSQL = """
+        SELECT
+            id,
+            source,
+            message_id,
+            subject,
+            sender,
+            recipients,
+            cc,
+            date_iso,
+            '' AS folder_path,
+            project_name,
+            customers_orgs,
+            '' AS main_meaning,
+            body_latest,
+            body_quoted
+        FROM messages
+        WHERE id = ?1
+        LIMIT 1
+        """
+        if sqlite3_prepare_v2(db, fallbackSQL, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            return stmt
+        }
+        return nil
+    }
+
+    private static func querySingleEmailDetail(
+        db: OpaquePointer,
+        messageRowID: Int64,
+        targetSKU: String
+    ) -> HistoricalEmailDetail? {
+        guard let stmt = prepareSingleMessageStatement(db: db) else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int64(stmt, 1, messageRowID)
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            return nil
+        }
+
+        let id = sqlite3_column_int64(stmt, 0)
+        let source = columnString(stmt, index: 1).trimmingCharacters(in: .whitespacesAndNewlines)
+        let rfcMessageID = ParsedEmailContext.normalizeMessageID(columnString(stmt, index: 2))
+        let subject = columnString(stmt, index: 3).trimmingCharacters(in: .whitespacesAndNewlines)
+        let sender = columnString(stmt, index: 4).trimmingCharacters(in: .whitespacesAndNewlines)
+        let recipients = columnString(stmt, index: 5).trimmingCharacters(in: .whitespacesAndNewlines)
+        let cc = columnString(stmt, index: 6).trimmingCharacters(in: .whitespacesAndNewlines)
+        let dateISO = columnString(stmt, index: 7).trimmingCharacters(in: .whitespacesAndNewlines)
+        let folderPath = columnString(stmt, index: 8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let projectName = columnString(stmt, index: 9).trimmingCharacters(in: .whitespacesAndNewlines)
+        let customersOrgs = columnString(stmt, index: 10).trimmingCharacters(in: .whitespacesAndNewlines)
+        let mainMeaning = columnString(stmt, index: 11).trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyLatest = columnString(stmt, index: 12).trimmingCharacters(in: .whitespacesAndNewlines)
+        let bodyQuoted = columnString(stmt, index: 13).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let evidences = queryPriceEvidences(db: db, messageRowID: id, targetSKU: targetSKU)
+        let attachments = queryEmailAttachments(db: db, messageRowID: id)
+
+        return HistoricalEmailDetail(
+            id: id,
+            source: source,
+            rfcMessageID: rfcMessageID,
+            subject: subject,
+            sender: sender,
+            recipients: recipients,
+            cc: cc,
+            dateISO: dateISO,
+            folderPath: folderPath,
+            projectName: projectName,
+            customersOrgs: customersOrgs,
+            mainMeaning: mainMeaning,
+            bodyLatest: bodyLatest,
+            bodyQuoted: bodyQuoted,
+            priceEvidences: evidences,
+            attachments: attachments,
+            mailJumpURL: nil
+        )
+    }
+
+    private static func queryPriceEvidences(
+        db: OpaquePointer,
+        messageRowID: Int64,
+        targetSKU: String
+    ) -> [HistoricalEmailPriceEvidence] {
+        let sql = """
+        SELECT
+            id,
+            sku,
+            currency,
+            unit_price,
+            quantity,
+            total_amount,
+            price_type,
+            tax_mode,
+            customer_org,
+            project_name,
+            source_kind,
+            evidence_snippet
+        FROM message_prices
+        WHERE message_id = ?1
+          AND unit_price IS NOT NULL
+          AND unit_price > 0
+        ORDER BY
+            CASE
+                WHEN UPPER(sku) = UPPER(?2) THEN 0
+                WHEN UPPER(sku) LIKE UPPER(?3) || '%' ESCAPE '\\' THEN 1
+                ELSE 2
+            END,
+            id ASC
+        LIMIT 24
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        let escapedSKU = escapeSQLLike(targetSKU)
+        sqlite3_bind_int64(stmt, 1, messageRowID)
+        targetSKU.withCString { cStr in
+            _ = sqlite3_bind_text(stmt, 2, cStr, -1, sqliteTransient)
+        }
+        escapedSKU.withCString { cStr in
+            _ = sqlite3_bind_text(stmt, 3, cStr, -1, sqliteTransient)
+        }
+
+        var evidences: [HistoricalEmailPriceEvidence] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let priceRowID = sqlite3_column_int64(stmt, 0)
+            let sku = columnString(stmt, index: 1).trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawCurrency = columnString(stmt, index: 2).trimmingCharacters(in: .whitespacesAndNewlines)
+            let currency = canonicalCurrency(rawCurrency)
+            guard sqlite3_column_type(stmt, 3) != SQLITE_NULL else { continue }
+            let unitPrice = sqlite3_column_double(stmt, 3)
+            guard unitPrice > 0 else { continue }
+
+            let quantity: Double? = sqlite3_column_type(stmt, 4) == SQLITE_NULL
+                ? nil
+                : sqlite3_column_double(stmt, 4)
+            let totalAmount: Double? = sqlite3_column_type(stmt, 5) == SQLITE_NULL
+                ? nil
+                : sqlite3_column_double(stmt, 5)
+            let priceType = columnString(stmt, index: 6).trimmingCharacters(in: .whitespacesAndNewlines)
+            let taxMode = columnString(stmt, index: 7).trimmingCharacters(in: .whitespacesAndNewlines)
+            let customerOrg = columnString(stmt, index: 8).trimmingCharacters(in: .whitespacesAndNewlines)
+            let projectName = columnString(stmt, index: 9).trimmingCharacters(in: .whitespacesAndNewlines)
+            let sourceKind = columnString(stmt, index: 10).trimmingCharacters(in: .whitespacesAndNewlines)
+            let evidenceSnippet = columnString(stmt, index: 11).trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if isBogusTinyRMBArtifact(
+                unitPrice: unitPrice,
+                canonicalCurrency: currency,
+                evidenceSnippet: evidenceSnippet
+            ) {
+                continue
+            }
+
+            evidences.append(
+                HistoricalEmailPriceEvidence(
+                    id: "\(messageRowID)|\(priceRowID)",
+                    sku: sku,
+                    currency: currency.isEmpty ? rawCurrency : currency,
+                    unitPrice: unitPrice,
+                    quantity: quantity,
+                    totalAmount: totalAmount,
+                    priceType: priceType,
+                    taxMode: taxMode,
+                    customerOrg: customerOrg,
+                    projectName: projectName,
+                    sourceKind: sourceKind,
+                    evidenceSnippet: evidenceSnippet
+                )
+            )
+        }
+        return evidences
+    }
+
+    private static func queryEmailAttachments(
+        db: OpaquePointer,
+        messageRowID: Int64
+    ) -> [HistoricalEmailAttachmentInfo] {
+        let sql = """
+        SELECT
+            id,
+            filename,
+            COALESCE(size_bytes, 0),
+            COALESCE(text_preview, '')
+        FROM message_attachments_mime
+        WHERE message_id = ?1
+          AND COALESCE(is_inline, 0) = 0
+        ORDER BY id ASC
+        LIMIT 16
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int64(stmt, 1, messageRowID)
+        var result: [HistoricalEmailAttachmentInfo] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowID = sqlite3_column_int64(stmt, 0)
+            let filename = columnString(stmt, index: 1).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !filename.isEmpty else { continue }
+            let sizeBytes = sqlite3_column_int64(stmt, 2)
+            let textPreview = columnString(stmt, index: 3).trimmingCharacters(in: .whitespacesAndNewlines)
+            result.append(
+                HistoricalEmailAttachmentInfo(
+                    id: "\(messageRowID)|\(rowID)",
+                    filename: filename,
+                    sizeBytes: sizeBytes,
+                    textPreview: textPreview
+                )
+            )
+        }
+        return result
     }
 
     // MARK: - Private Utilities

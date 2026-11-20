@@ -271,19 +271,15 @@ final class EmailAnalysisViewModel: ObservableObject {
 
 public struct EmailAnalysisPanelView: View {
     @StateObject private var vm: EmailAnalysisViewModel
-    private let onOpenExternalURL: (@MainActor (URL) -> Void)?
     @State private var showKeychainSheet = false
     @State private var showAttachmentFilingSheet = false
     @State private var filingFocusFilename: String?
+    @State private var selectedPriceRecordForDetail: HistoricalPriceRecord?
     @State private var showRawLocalExtraction = false
     @State private var expandedPriceSKUs: Set<String> = []
 
-    public init(
-        email: ParsedEmailContext,
-        onOpenExternalURL: (@MainActor (URL) -> Void)? = nil
-    ) {
+    public init(email: ParsedEmailContext) {
         _vm = StateObject(wrappedValue: EmailAnalysisViewModel(email: email))
-        self.onOpenExternalURL = onOpenExternalURL
     }
 
     public var body: some View {
@@ -309,6 +305,13 @@ public struct EmailAnalysisPanelView: View {
                     preselectedFilename: filingFocusFilename,
                     onClose: {
                         showAttachmentFilingSheet = false
+                    }
+                )
+            } else if let detailRecord = selectedPriceRecordForDetail {
+                HistoricalEmailDetailSheet(
+                    record: detailRecord,
+                    onClose: {
+                        selectedPriceRecordForDetail = nil
                     }
                 )
             } else {
@@ -646,7 +649,7 @@ public struct EmailAnalysisPanelView: View {
             if vm.reminderPermissionDenied {
                 Button("打开系统设置") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders") {
-                        openExternalURL(url)
+                        NSWorkspace.shared.open(url)
                     }
                 }
                 .controlSize(.mini)
@@ -984,17 +987,15 @@ public struct EmailAnalysisPanelView: View {
 
             Spacer(minLength: 6)
 
-            if let jumpURL = record.mailJumpURL {
-                Button {
-                    openExternalURL(jumpURL)
-                } label: {
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.accentColor)
-                }
-                .buttonStyle(.plain)
-                .help(record.subject.isEmpty ? "在 Apple Mail 中打开原报价邮件" : "打开原邮件：\(record.subject)")
+            Button {
+                selectedPriceRecordForDetail = record
+            } label: {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.accentColor)
             }
+            .buttonStyle(.plain)
+            .help(record.subject.isEmpty ? "查看原报价邮件全文与提取证据" : "查看原邮件：\(record.subject)")
         }
         .padding(.vertical, 4.5)
     }
@@ -1011,11 +1012,7 @@ public struct EmailAnalysisPanelView: View {
     }
 
     private static func formatUnitPrice(_ value: Double) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        formatter.minimumFractionDigits = 0
-        formatter.maximumFractionDigits = 2
-        return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
+        HistoricalPriceLookupService.formatUnitPrice(value)
     }
 
     private func businessSection(_ biz: BusinessElements) -> some View {
@@ -1272,15 +1269,5 @@ public struct EmailAnalysisPanelView: View {
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
-    }
-
-    private func openExternalURL(_ url: URL) {
-        if let onOpenExternalURL {
-            onOpenExternalURL(url)
-        } else {
-            let config = NSWorkspace.OpenConfiguration()
-            config.activates = true
-            NSWorkspace.shared.open(url, configuration: config, completionHandler: nil)
-        }
     }
 }

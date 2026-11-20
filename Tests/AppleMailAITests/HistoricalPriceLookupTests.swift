@@ -1,26 +1,6 @@
-import AppKit
 import Foundation
 import SQLite3
 import XCTest
-
-@MainActor
-private final class MockServiceParentViewController: NSViewController {
-    var invalidateCallCount = 0
-    var invalidatedAt: CFAbsoluteTime?
-    var onInvalidate: (() -> Void)?
-
-    @objc func invalidate() {
-        invalidateCallCount += 1
-        invalidatedAt = CFAbsoluteTimeGetCurrent()
-        onInvalidate?()
-    }
-}
-
-@MainActor
-private final class OpenedURLRecorder {
-    var openedURLs: [URL] = []
-    var openedAt: CFAbsoluteTime?
-}
 
 final class HistoricalPriceLookupTests: XCTestCase {
     private var tempDir: URL!
@@ -844,72 +824,204 @@ final class HistoricalPriceLookupTests: XCTestCase {
         XCTAssertEqual(record.projectName, "2026 Q4 FEP 统计")
     }
 
-    // MARK: - Popover Dismissal & Jump Handoff
+    // MARK: - In-Panel Source Email & Evidence Detail Queries
 
-    @MainActor
-    func testMessageAnalysisViewControllerDismissesServicePopoverBeforeOpeningJumpURL() async throws {
-        let parent = MockServiceParentViewController(nibName: nil, bundle: nil)
-        let recorder = OpenedURLRecorder()
-        let invalidatedExpectation = expectation(description: "Mock service parent invalidated")
-        let openedExpectation = expectation(description: "Target message URL opened")
-        let targetURL = try XCTUnwrap(URL(string: "message://%3Ctest-123@moxa.com%3E"))
-
-        weak var weakVC: MessageAnalysisViewController?
-        do {
-            let vc = MessageAnalysisViewController(
-                emailContext: makeEmail(subject: "报价参考", plainBody: "正文"),
-                openDelaySeconds: 0.08,
-                urlOpener: { url in
-                    recorder.openedURLs.append(url)
-                    recorder.openedAt = CFAbsoluteTimeGetCurrent()
-                    openedExpectation.fulfill()
-                }
+    func testLoadHistoricalEmailDetailsReturnsMergedThreadEmailsPriceEvidenceAndAttachments() async throws {
+        try buildMockOutlookDatabase(at: dbURL) { db in
+            try execSQL(
+                db: db,
+                sql: """
+                CREATE TABLE message_attachments_mime (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER NOT NULL REFERENCES messages(id),
+                    uid_key TEXT NOT NULL DEFAULT '',
+                    filename TEXT NOT NULL,
+                    ext TEXT NOT NULL DEFAULT '',
+                    mime_type TEXT NOT NULL DEFAULT '',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    is_inline INTEGER NOT NULL DEFAULT 0,
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    text_preview TEXT NOT NULL DEFAULT ''
+                );
+                """
             )
-            weakVC = vc
-            parent.addChild(vc)
-            parent.onInvalidate = { [weak vc] in
-                vc?.removeFromParent()
-                invalidatedExpectation.fulfill()
-            }
 
-            vc.dismissPopoverAndOpenURL(targetURL)
-            // Double-click in the same frame must be deduplicated cleanly.
-            vc.dismissPopoverAndOpenURL(targetURL)
+            let newerMsgID = try insertMessage(
+                db: db,
+                messageID: "q4-reply-new@jxtd.com",
+                subject: "Re: 2026 第四季度 Q4 FEP 数量统计",
+                threadTopic: "2026 第四季度 Q4 FEP 数量统计",
+                sender: "zhang@jxtd.com",
+                recipients: "baoshan.wang@moxa.com",
+                dateISO: "2026-11-13",
+                projectName: "",
+                customerOrg: "北京佳信通达",
+                bodyLatest: "请按附件表格中 DE-LN04-RJ 未税单价 900 RMB 执行。",
+                bodyQuoted: "On 2026-10-30 WindIT wrote: 请确认 Q4 统计。"
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: newerMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 900.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "北京佳信通达",
+                projectName: "",
+                quoteDateISO: "2026-11-13",
+                sourceKind: "mime_attachment",
+                evidenceSnippet: "[2026Q4_FEP_统计.xlsx] DE-LN04-RJ | 900 CNY/pc(未稅)",
+                confidence: "high"
+            )
+            // Bogus tiny-integer RMB row on the same message must be excluded from detail evidence too.
+            try insertPrice(
+                db: db,
+                messageRowID: newerMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 4.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "北京佳信通达",
+                projectName: "",
+                quoteDateISO: "2026-11-13",
+                sourceKind: "html_table",
+                evidenceSnippet: "价格未税: DE-LN04-RJ: 900 CNY/pc(未稅)",
+                confidence: "high"
+            )
+            try execSQL(
+                db: db,
+                sql: """
+                INSERT INTO message_attachments_mime (message_id, filename, ext, mime_type, size_bytes, is_inline, text_preview)
+                VALUES (\(newerMsgID), '2026Q4_FEP_统计.xlsx', '.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 24576, 0, 'DE-LN04-RJ 900 未税');
+                """
+            )
+            try execSQL(
+                db: db,
+                sql: """
+                INSERT INTO message_attachments_mime (message_id, filename, ext, mime_type, size_bytes, is_inline, text_preview)
+                VALUES (\(newerMsgID), 'signature-logo.png', '.png', 'image/png', 1024, 1, '');
+                """
+            )
+
+            let olderMsgID = try insertMessage(
+                db: db,
+                messageID: "q4-reply-old@windit.com",
+                subject: "回复：2026 第四季度 Q4 FEP 数量统计",
+                threadTopic: "2026 第四季度 Q4 FEP 数量统计",
+                sender: "li@windit.com",
+                recipients: "baoshan.wang@moxa.com",
+                dateISO: "2026-10-30",
+                projectName: "",
+                customerOrg: "浙江中自庆安 (WindIT)",
+                bodyLatest: "中自庆安 Q4 DE-LN04-RJ 仍按 900 未税申报。",
+                bodyQuoted: ""
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: olderMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 900.0,
+                quantity: 20,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "浙江中自庆安 (WindIT)",
+                projectName: "",
+                quoteDateISO: "2026-10-30",
+                sourceKind: "body_latest",
+                evidenceSnippet: "中自庆安 Q4 DE-LN04-RJ 900 RMB 20pcs",
+                confidence: "high"
+            )
         }
 
-        await fulfillment(of: [invalidatedExpectation, openedExpectation], timeout: 1.0)
-        parent.onInvalidate = nil
+        let email = makeEmail(subject: "请报价 DE-LN04-RJ", plainBody: "请问 DE-LN04-RJ 价格。")
+        let groups = await service.lookupRelatedPrices(for: email, runtimeDBPath: dbURL.path)
+        let mergedRecord = try XCTUnwrap(groups.first?.records.first)
+        XCTAssertEqual(mergedRecord.occurrenceCount, 2)
+        XCTAssertEqual(mergedRecord.mergedMessageRowIDs.count, 2)
 
-        XCTAssertEqual(parent.invalidateCallCount, 1)
-        XCTAssertEqual(recorder.openedURLs, [targetURL])
-        let invalidatedAt = try XCTUnwrap(parent.invalidatedAt)
-        let openedAt = try XCTUnwrap(recorder.openedAt)
-        XCTAssertLessThanOrEqual(invalidatedAt, openedAt)
-        XCTAssertNil(weakVC)
+        let details = await service.loadHistoricalEmailDetails(for: mergedRecord, runtimeDBPath: dbURL.path)
+        XCTAssertEqual(details.count, 2)
+
+        let newest = details[0]
+        XCTAssertEqual(newest.rfcMessageID, "q4-reply-new@jxtd.com")
+        XCTAssertEqual(newest.sender, "zhang@jxtd.com")
+        XCTAssertEqual(newest.sourceLabel, "Apple Mail")
+        XCTAssertEqual(newest.bodyLatest, "请按附件表格中 DE-LN04-RJ 未税单价 900 RMB 执行。")
+        XCTAssertEqual(newest.bodyQuoted, "On 2026-10-30 WindIT wrote: 请确认 Q4 统计。")
+        XCTAssertEqual(newest.mailJumpURL, URL(string: "message://%3Cq4-reply-new@jxtd.com%3E"))
+        XCTAssertEqual(newest.priceEvidences.count, 1)
+        XCTAssertEqual(newest.priceEvidences.first?.sourceKindLabel, "附件表格")
+        XCTAssertEqual(newest.priceEvidences.first?.unitPrice ?? 0, 900.0, accuracy: 0.001)
+        XCTAssertEqual(newest.attachments.count, 1)
+        XCTAssertEqual(newest.attachments.first?.filename, "2026Q4_FEP_统计.xlsx")
+        XCTAssertEqual(newest.attachments.first?.sizeBytes, 24576)
+
+        let older = details[1]
+        XCTAssertEqual(older.rfcMessageID, "q4-reply-old@windit.com")
+        XCTAssertEqual(older.priceEvidences.first?.sourceKindLabel, "邮件正文")
     }
 
-    @MainActor
-    func testMessageAnalysisViewControllerPlainParentDoesNotThrowAndStillOpensURL() async throws {
-        let plainParent = NSViewController(nibName: nil, bundle: nil)
-        let recorder = OpenedURLRecorder()
-        let openedExpectation = expectation(description: "Fallback URL opened cleanly")
+    func testLoadHistoricalEmailDetailsFallsBackToRFCMessageIDAndMinimalSchema() async throws {
+        try buildMockOutlookDatabase(at: dbURL, includeThreadTopic: false) { db in
+            let rowID = try insertMessage(
+                db: db,
+                messageID: "<legacy-fallback@moxa.com>",
+                subject: "TN-4908 历史报价",
+                sender: "sales@moxa.com",
+                recipients: "buyer@client.com",
+                dateISO: "2025-11-01",
+                projectName: "地铁项目",
+                customerOrg: "客户甲",
+                bodyLatest: "TN-4908-4GTX-WV-CT-T 报价 15800 未税。",
+                bodyQuoted: "",
+                hasThreadTopicColumn: false
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: rowID,
+                sku: "TN-4908-4GTX-WV-CT-T",
+                currency: "RMB",
+                unitPrice: 15800.0,
+                quantity: 10,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "客户甲",
+                projectName: "地铁项目",
+                quoteDateISO: "2025-11-01",
+                sourceKind: "body_latest",
+                evidenceSnippet: "TN-4908-4GTX-WV-CT-T 报价 15800",
+                confidence: "high"
+            )
+        }
 
-        let vc = MessageAnalysisViewController(
-            emailContext: makeEmail(subject: "报价参考", plainBody: "正文"),
-            openDelaySeconds: 0.03,
-            urlOpener: { url in
-                recorder.openedURLs.append(url)
-                recorder.openedAt = CFAbsoluteTimeGetCurrent()
-                openedExpectation.fulfill()
-            }
+        let rfcOnlyRecord = HistoricalPriceRecord(
+            sku: "TN-4908-4GTX-WV-CT-T",
+            currency: "RMB",
+            unitPrice: 15800.0,
+            priceType: "quote",
+            taxMode: "未税",
+            customerOrg: "客户甲",
+            projectName: "地铁项目",
+            quoteDateISO: "2025-11-01",
+            subject: "TN-4908 历史报价",
+            rfcMessageID: "legacy-fallback@moxa.com",
+            sourceMessageRowID: nil,
+            mergedMessageRowIDs: []
         )
-        plainParent.addChild(vc)
 
-        let targetURL = try XCTUnwrap(URL(string: "message://%3Cplain-parent@moxa.com%3E"))
-        vc.dismissPopoverAndOpenURL(targetURL)
-
-        await fulfillment(of: [openedExpectation], timeout: 1.0)
-        XCTAssertEqual(recorder.openedURLs, [targetURL])
+        let details = await service.loadHistoricalEmailDetails(for: rfcOnlyRecord, runtimeDBPath: dbURL.path)
+        XCTAssertEqual(details.count, 1)
+        let detail = try XCTUnwrap(details.first)
+        XCTAssertEqual(detail.subject, "TN-4908 历史报价")
+        XCTAssertEqual(detail.bodyLatest, "TN-4908-4GTX-WV-CT-T 报价 15800 未税。")
+        XCTAssertTrue(detail.attachments.isEmpty)
+        XCTAssertEqual(detail.priceEvidences.count, 1)
+        XCTAssertEqual(detail.mailJumpURL, URL(string: "message://%3Clegacy-fallback@moxa.com%3E"))
     }
 
     // MARK: - Helpers
@@ -1058,21 +1170,25 @@ final class HistoricalPriceLookupTests: XCTestCase {
         messageID: String,
         subject: String,
         threadTopic: String = "",
+        sender: String = "sales@moxa.com",
+        recipients: String = "",
         dateISO: String,
         projectName: String,
         customerOrg: String,
+        bodyLatest: String = "body",
+        bodyQuoted: String = "",
         hasThreadTopicColumn: Bool = true
     ) throws -> Int64 {
         let sql: String
         if hasThreadTopicColumn {
             sql = """
-            INSERT INTO messages (source, source_ref, message_id, subject, sender, date_iso, body_latest, content_hash, project_name, customers_orgs, thread_topic)
-            VALUES ('apple_mail', ?, ?, ?, 'sales@moxa.com', ?, 'body', ?, ?, ?, ?);
+            INSERT INTO messages (source, source_ref, message_id, subject, sender, recipients, date_iso, body_latest, body_quoted, content_hash, project_name, customers_orgs, thread_topic)
+            VALUES ('apple_mail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
         } else {
             sql = """
-            INSERT INTO messages (source, source_ref, message_id, subject, sender, date_iso, body_latest, content_hash, project_name, customers_orgs)
-            VALUES ('apple_mail', ?, ?, ?, 'sales@moxa.com', ?, 'body', ?, ?, ?);
+            INSERT INTO messages (source, source_ref, message_id, subject, sender, recipients, date_iso, body_latest, body_quoted, content_hash, project_name, customers_orgs)
+            VALUES ('apple_mail', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
         }
         var stmt: OpaquePointer?
@@ -1086,12 +1202,16 @@ final class HistoricalPriceLookupTests: XCTestCase {
         "ref-\(hash)".withCString { _ = sqlite3_bind_text(stmt, 1, $0, -1, transient) }
         messageID.withCString { _ = sqlite3_bind_text(stmt, 2, $0, -1, transient) }
         subject.withCString { _ = sqlite3_bind_text(stmt, 3, $0, -1, transient) }
-        dateISO.withCString { _ = sqlite3_bind_text(stmt, 4, $0, -1, transient) }
-        hash.withCString { _ = sqlite3_bind_text(stmt, 5, $0, -1, transient) }
-        projectName.withCString { _ = sqlite3_bind_text(stmt, 6, $0, -1, transient) }
-        customerOrg.withCString { _ = sqlite3_bind_text(stmt, 7, $0, -1, transient) }
+        sender.withCString { _ = sqlite3_bind_text(stmt, 4, $0, -1, transient) }
+        recipients.withCString { _ = sqlite3_bind_text(stmt, 5, $0, -1, transient) }
+        dateISO.withCString { _ = sqlite3_bind_text(stmt, 6, $0, -1, transient) }
+        bodyLatest.withCString { _ = sqlite3_bind_text(stmt, 7, $0, -1, transient) }
+        bodyQuoted.withCString { _ = sqlite3_bind_text(stmt, 8, $0, -1, transient) }
+        hash.withCString { _ = sqlite3_bind_text(stmt, 9, $0, -1, transient) }
+        projectName.withCString { _ = sqlite3_bind_text(stmt, 10, $0, -1, transient) }
+        customerOrg.withCString { _ = sqlite3_bind_text(stmt, 11, $0, -1, transient) }
         if hasThreadTopicColumn {
-            threadTopic.withCString { _ = sqlite3_bind_text(stmt, 8, $0, -1, transient) }
+            threadTopic.withCString { _ = sqlite3_bind_text(stmt, 12, $0, -1, transient) }
         }
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
@@ -1112,6 +1232,7 @@ final class HistoricalPriceLookupTests: XCTestCase {
         customerOrg: String,
         projectName: String,
         quoteDateISO: String,
+        sourceKind: String = "body",
         evidenceSnippet: String,
         confidence: String
     ) throws {
@@ -1120,7 +1241,7 @@ final class HistoricalPriceLookupTests: XCTestCase {
             message_id, uid_key, sku, product_family, project_name, customer_org,
             currency, unit_price, quantity, price_type, tax_mode, quote_date_iso,
             source_kind, evidence_snippet, confidence
-        ) VALUES (?, ?, ?, 'TN', ?, ?, ?, ?, ?, ?, ?, ?, 'body', ?, ?);
+        ) VALUES (?, ?, ?, 'TN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
@@ -1144,8 +1265,9 @@ final class HistoricalPriceLookupTests: XCTestCase {
         priceType.withCString { _ = sqlite3_bind_text(stmt, 9, $0, -1, transient) }
         taxMode.withCString { _ = sqlite3_bind_text(stmt, 10, $0, -1, transient) }
         quoteDateISO.withCString { _ = sqlite3_bind_text(stmt, 11, $0, -1, transient) }
-        evidenceSnippet.withCString { _ = sqlite3_bind_text(stmt, 12, $0, -1, transient) }
-        confidence.withCString { _ = sqlite3_bind_text(stmt, 13, $0, -1, transient) }
+        sourceKind.withCString { _ = sqlite3_bind_text(stmt, 12, $0, -1, transient) }
+        evidenceSnippet.withCString { _ = sqlite3_bind_text(stmt, 13, $0, -1, transient) }
+        confidence.withCString { _ = sqlite3_bind_text(stmt, 14, $0, -1, transient) }
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw NSError(domain: "HistoricalPriceLookupTests", code: -4)
