@@ -32,6 +32,28 @@ final class VertexGeminiClientTests: XCTestCase {
         return VertexGeminiClient(session: URLSession(configuration: config))
     }
 
+    private static func requestBodyJSON(_ request: URLRequest) -> [String: Any]? {
+        let data: Data?
+        if let body = request.httpBody {
+            data = body
+        } else if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            var collected = Data()
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: buffer.count)
+                if read <= 0 { break }
+                collected.append(buffer, count: read)
+            }
+            data = collected
+        } else {
+            data = nil
+        }
+        guard let data else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
     func testVertexGlobalEndpoints() {
         let projectID = "your-gcp-project-id"
         XCTAssertEqual(
@@ -58,6 +80,15 @@ final class VertexGeminiClientTests: XCTestCase {
                 let body = Data(#"{"totalTokens": 1}"#.utf8)
                 let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
                 return (resp, body)
+            }
+
+            let reqJSON = Self.requestBodyJSON(request)
+            let genConfig = reqJSON?["generationConfig"] as? [String: Any]
+            let thinking = genConfig?["thinkingConfig"] as? [String: Any]
+            if urlStr.contains("gemini-3.8-flash") {
+                XCTAssertEqual(thinking?["thinkingBudget"] as? Int, 0)
+            } else if urlStr.contains("gemini-4-carbon") {
+                XCTAssertEqual(thinking?["thinkingLevel"] as? String, "LOW")
             }
 
             let innerJSON = """
@@ -141,12 +172,29 @@ final class VertexGeminiClientTests: XCTestCase {
         XCTAssertEqual(result.outputTokens, 140)
         XCTAssertEqual(result.cachedTokens, 64)
         XCTAssertEqual(result.timeline.count, 2)
+
+        let flashResult = try await client.analyzeEmail(
+            email,
+            model: .flash38,
+            apiKey: "AQ.test-key",
+            projectID: "your-gcp-project-id"
+        )
+        XCTAssertEqual(flashResult.modelUsed, "gemini-3.8-flash")
+        XCTAssertEqual(flashResult.headline, "客户确认批量采购 120 台 EDS-4012")
     }
 
     func testGenerateBilingualReplyDraftAndHTTPErrorHandling() async throws {
         let client = makeMockClient()
 
         MockURLProtocol.requestHandler = { request in
+            let urlStr = request.url?.absoluteString ?? ""
+            let reqJSON = Self.requestBodyJSON(request)
+            let genConfig = reqJSON?["generationConfig"] as? [String: Any]
+            let thinking = genConfig?["thinkingConfig"] as? [String: Any]
+            if urlStr.contains("gemini-3.8-flash") {
+                XCTAssertEqual(thinking?["thinkingBudget"] as? Int, 0)
+            }
+
             let innerJSON = """
             {
               "suggestedSubject": "Re: [Project Helios-III] Proforma Invoice & Compliance Reports",

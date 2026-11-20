@@ -42,6 +42,28 @@ final class EmailAnalysisViewModel: ObservableObject {
             return
         }
 
+        if let inFlight = await BackgroundAnalysisCoordinator.shared.inFlightTask(forMessageID: email.messageID) {
+            isLoading = true
+            let result = try? await inFlight.value
+            isLoading = false
+            if let result {
+                analysis = result
+                isFromCache = true
+                if let cachedModel = GeminiModel(rawValue: result.modelUsed) {
+                    selectedModel = cachedModel
+                }
+                return
+            }
+            if let cached = cacheStore.load(forMessageID: email.messageID) {
+                analysis = cached
+                isFromCache = true
+                if let cachedModel = GeminiModel(rawValue: cached.modelUsed) {
+                    selectedModel = cachedModel
+                }
+                return
+            }
+        }
+
         if hasAPIKey {
             await analyze(forceRefresh: false)
         }

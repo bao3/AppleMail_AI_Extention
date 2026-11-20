@@ -36,8 +36,9 @@ public final class VertexGeminiClient: Sendable {
             self.session = session
         } else {
             let config = URLSessionConfiguration.ephemeral
-            config.timeoutIntervalForRequest = 90
-            config.timeoutIntervalForResource = 120
+            config.timeoutIntervalForRequest = 60
+            config.timeoutIntervalForResource = 90
+            config.httpMaximumConnectionsPerHost = 4
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
             self.session = URLSession(configuration: config)
         }
@@ -112,8 +113,8 @@ public final class VertexGeminiClient: Sendable {
            - customers：客户公司、终端用户、相关团队或联系人；
            - models：产品型号、SKU、物料号（Part Number）、规格配置；
            - pricing：所有报价明细（itemOrModel、quantity、unitPrice、currency、termsOrLeadTime 贸易条款/交期、notes）。若某子项未提及填 ""。
-        5. plainChineseTranslation：将邮件最新正文（以及关键英文内容）翻译为通俗、自然、符合中国工程师与商务习惯的中文；若原信已是纯中文，则整理为条理清晰的白话摘要，不丢失关键数字与技术名词。
-        6. timeline：如果是长信或多轮往来邮件，按时间由早到晚梳理关键来往节点（timeOrStep、actor、summary）；如果是单封短邮件，则输出 1~2 条关键节点。
+        5. plainChineseTranslation：若最新正文包含英文或外文内容，准确翻译为通俗、自然、符合中国工程师与商务习惯的简体中文；若原信已是简体中文，仅输出 2~3 句精炼白话摘要（不要逐字复述中文原文），不丢失关键数字与技术名词。
+        6. timeline：如果是长信或多轮往来邮件，按时间由早到晚梳理最多 5 个关键来往节点（timeOrStep、actor、summary）；如果是单封短邮件，仅输出 1 个关键节点。
         """
 
         let bodyObject: [String: Any] = [
@@ -133,7 +134,8 @@ public final class VertexGeminiClient: Sendable {
             "generationConfig": [
                 "temperature": 0.2,
                 "responseMimeType": "application/json",
-                "responseSchema": Self.emailAnalysisResponseSchema()
+                "responseSchema": Self.emailAnalysisResponseSchema(),
+                "thinkingConfig": model.thinkingConfig
             ]
         ]
 
@@ -246,7 +248,8 @@ public final class VertexGeminiClient: Sendable {
             "generationConfig": [
                 "temperature": 0.3,
                 "responseMimeType": "application/json",
-                "responseSchema": Self.composeReplyResponseSchema()
+                "responseSchema": Self.composeReplyResponseSchema(),
+                "thinkingConfig": model.thinkingConfig
             ]
         ]
 

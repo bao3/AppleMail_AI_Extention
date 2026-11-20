@@ -67,9 +67,19 @@ final class AnalysisCacheStoreTests: XCTestCase {
         let stats = store.cacheStats()
         XCTAssertEqual(stats.count, 1)
         XCTAssertGreaterThan(stats.totalBytes, 0)
+        XCTAssertEqual(store.cachedHeadlineInMemory(forMessageID: rawID), "深度复核版结论")
+
+        // Fresh store instance warms knownCachedKeys from existing JSON files on disk (without reading payloads)
+        let warmedStore = AnalysisCacheStore(baseDirectory: tempDir)
+        XCTAssertTrue(warmedStore.hasCachedAnalysisInMemory(forMessageID: rawID))
+        XCTAssertNil(warmedStore.cachedHeadlineInMemory(forMessageID: rawID))
+        let loadedFromWarmed = warmedStore.load(forMessageID: rawID)
+        XCTAssertEqual(loadedFromWarmed?.headline, "深度复核版结论")
+        XCTAssertEqual(warmedStore.cachedHeadlineInMemory(forMessageID: rawID), "深度复核版结论")
 
         let cleared = store.clearAll()
         XCTAssertEqual(cleared, 1)
         XCTAssertFalse(store.hasCachedAnalysis(forMessageID: rawID))
+        XCTAssertNil(store.cachedHeadlineInMemory(forMessageID: rawID))
     }
 }

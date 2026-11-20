@@ -37,6 +37,15 @@ public enum GeminiModel: String, CaseIterable, Codable, Sendable, Identifiable {
         }
     }
 
+    public var thinkingConfig: [String: Any] {
+        switch self {
+        case .flash38:
+            return ["thinkingBudget": 0]
+        case .carbon4:
+            return ["thinkingLevel": "LOW"]
+        }
+    }
+
     public func generateContentURL(projectID: String) -> URL {
         URL(string: "https://aiplatform.googleapis.com/v1beta1/projects/\(projectID)/locations/\(Self.vertexLocation)/publishers/google/models/\(rawValue):generateContent")!
     }

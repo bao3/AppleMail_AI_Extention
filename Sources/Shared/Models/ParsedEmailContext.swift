@@ -125,7 +125,11 @@ public struct ParsedEmailContext: Codable, Sendable, Hashable {
         )
     }
 
-    public func formattedPromptInput() -> String {
+    public func formattedPromptInput(
+        maxBodyChars: Int = 16_000,
+        maxQuoteChars: Int = 10_000,
+        maxQuoteBlocks: Int = 8
+    ) -> String {
         var lines: [String] = []
         lines.append("Message-ID: \(messageID)")
         lines.append("Subject: \(subject.isEmpty ? "(无主题)" : subject)")
@@ -149,16 +153,28 @@ public struct ParsedEmailContext: Codable, Sendable, Hashable {
             lines.append("Attachments: \(desc.joined(separator: "; "))")
         }
 
+        let boundedBody = Self.truncate(plainBody, limit: maxBodyChars)
         lines.append("")
         lines.append("=== 最新正文 (Latest Message Body) ===")
-        lines.append(plainBody.isEmpty ? "(正文为空)" : plainBody)
+        lines.append(boundedBody.isEmpty ? "(正文为空)" : boundedBody)
 
-        if !quotedChain.isEmpty {
-            lines.append("")
-            lines.append("=== 历史引用链 (Quoted Thread History, 按原文从近到远) ===")
-            for block in quotedChain {
-                lines.append("--- 引用段 #\(block.index): \(block.attribution) ---")
-                lines.append(block.content)
+        if !quotedChain.isEmpty, maxQuoteBlocks > 0, maxQuoteChars > 0 {
+            var remainingQuoteBudget = maxQuoteChars
+            var includedLines: [String] = []
+            for block in quotedChain.prefix(maxQuoteBlocks) {
+                guard remainingQuoteBudget > 0 else { break }
+                let content = Self.truncate(block.content, limit: remainingQuoteBudget)
+                remainingQuoteBudget -= content.count
+                includedLines.append("--- 引用段 #\(block.index): \(Self.truncate(block.attribution, limit: 240)) ---")
+                includedLines.append(content)
+            }
+            if !includedLines.isEmpty {
+                lines.append("")
+                lines.append("=== 历史引用链 (Quoted Thread History, 按原文从近到远) ===")
+                lines.append(contentsOf: includedLines)
+                if quotedChain.count > maxQuoteBlocks || remainingQuoteBudget <= 0 {
+                    lines.append("...（其余更早引用已省略）")
+                }
             }
         }
         return lines.joined(separator: "\n")

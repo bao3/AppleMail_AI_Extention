@@ -29,6 +29,7 @@
             <key>MEExtensionCapabilities</key>
             <array>
                 <string>MEMessageSecurityHandler</string>
+                <string>MEMessageActionHandler</string>
                 <string>MEComposeSessionHandler</string>
             </array>
             <key>MEComposeSession</key>

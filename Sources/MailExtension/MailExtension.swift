@@ -14,6 +14,11 @@ final class MailExtension: NSObject, MEExtension {
         return MessageSecurityHandler.shared
     }
 
+    nonisolated func handlerForMessageActions() -> any MEMessageActionHandler {
+        ExtensionLogger.lifecycle.debug("handlerForMessageActions requested (mainThread=\(Thread.isMainThread, privacy: .public))")
+        return MessageActionHandler.shared
+    }
+
     nonisolated func handler(for session: MEComposeSession) -> any MEComposeSessionHandler {
         ExtensionLogger.lifecycle.info("handler(for: MEComposeSession) requested (mainThread=\(Thread.isMainThread, privacy: .public))")
         return ComposeSessionHandler()

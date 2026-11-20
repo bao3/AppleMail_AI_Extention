@@ -6,6 +6,7 @@ final class KeychainSettingsViewModel: ObservableObject {
     @Published var apiKeyInput: String = ""
     @Published var maskedKeyStatus: String?
     @Published var selectedModel: GeminiModel
+    @Published var autoAnalyzeMoxaPrimary: Bool
     @Published var isTestingConnection = false
     @Published var statusMessage: String?
     @Published var isErrorStatus = false
@@ -18,6 +19,7 @@ final class KeychainSettingsViewModel: ObservableObject {
         self.client = client
         self.projectIDInput = keychain.loadProjectID()
         self.selectedModel = keychain.loadPreferredModel()
+        self.autoAnalyzeMoxaPrimary = ExtensionOpsConfig.isAutoAnalyzeMoxaPrimaryEnabled
         self.maskedKeyStatus = keychain.maskedAPIKeyStatus()
     }
 
@@ -25,6 +27,7 @@ final class KeychainSettingsViewModel: ObservableObject {
         projectIDInput = keychain.loadProjectID()
         maskedKeyStatus = keychain.maskedAPIKeyStatus()
         selectedModel = keychain.loadPreferredModel()
+        autoAnalyzeMoxaPrimary = ExtensionOpsConfig.isAutoAnalyzeMoxaPrimaryEnabled
     }
 
     func saveProjectID() {
@@ -78,6 +81,11 @@ final class KeychainSettingsViewModel: ObservableObject {
     func updatePreferredModel(_ model: GeminiModel) {
         selectedModel = model
         keychain.savePreferredModel(model)
+    }
+
+    func updateAutoAnalyzeMoxaPrimary(_ enabled: Bool) {
+        autoAnalyzeMoxaPrimary = enabled
+        ExtensionOpsConfig.setAutoAnalyzeMoxaPrimaryEnabled(enabled)
     }
 
     func testConnection(model: GeminiModel) async {
@@ -240,6 +248,17 @@ public struct KeychainSettingsSheet: View {
 
                         Spacer()
                     }
+
+                    Divider()
+
+                    Toggle(
+                        "后台自动分析 Moxa Primary 新邮件（收信自动预热缓存）",
+                        isOn: Binding(
+                            get: { vm.autoAnalyzeMoxaPrimary },
+                            set: { vm.updateAutoAnalyzeMoxaPrimary($0) }
+                        )
+                    )
+                    .font(.caption)
                 }
                 .padding(4)
             }

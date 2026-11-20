@@ -75,6 +75,11 @@ public enum MIMEParser {
         return false
     }
 
+    /// Extracts lowercased RFC 5322 top-level header arrays without decoding the message body.
+    public static func extractTopLevelHeaders(_ rawData: Data) -> [String: [String]] {
+        splitHeadersAndBody(rawData, bodySliceNeeded: false)?.rawHeaderValues ?? [:]
+    }
+
     /// Parses raw RFC 5322 MIME data locally into headers, body, reply chain, and attachment summaries.
     public static func parse(rawData: Data) -> ParsedEmailContext {
         guard let root = splitHeadersAndBody(rawData, bodySliceNeeded: true) else {

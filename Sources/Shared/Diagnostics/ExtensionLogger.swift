@@ -9,6 +9,7 @@ public enum ExtensionLogger {
 
     public static let lifecycle = Logger(subsystem: subsystem, category: "lifecycle")
     public static let security = Logger(subsystem: subsystem, category: "security")
+    public static let action = Logger(subsystem: subsystem, category: "action")
     public static let compose = Logger(subsystem: subsystem, category: "compose")
     public static let mime = Logger(subsystem: subsystem, category: "mime")
     public static let keychain = Logger(subsystem: subsystem, category: "keychain")
@@ -20,8 +21,21 @@ public enum ExtensionLogger {
 public enum ExtensionOpsConfig {
     /// Set to `true` to disable `MEMessageSecurityHandler` banner injection while keeping `MEComposeSessionHandler` active.
     public static let disableSecurityBannerKey = "com.bao3.AppleMailAI.disableSecurityBanner"
+    /// Toggle for Moxa Primary background pre-analysis via `MEMessageActionHandler` (defaults to `true`).
+    public static let autoAnalyzeMoxaPrimaryKey = "com.bao3.AppleMailAI.autoAnalyzeMoxaPrimary"
 
     public static var isSecurityBannerDisabled: Bool {
         UserDefaults.standard.bool(forKey: disableSecurityBannerKey)
+    }
+
+    public static var isAutoAnalyzeMoxaPrimaryEnabled: Bool {
+        if UserDefaults.standard.object(forKey: autoAnalyzeMoxaPrimaryKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: autoAnalyzeMoxaPrimaryKey)
+    }
+
+    public static func setAutoAnalyzeMoxaPrimaryEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: autoAnalyzeMoxaPrimaryKey)
     }
 }

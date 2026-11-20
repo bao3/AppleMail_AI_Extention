@@ -10,6 +10,7 @@ public final class AnalysisCacheStore: @unchecked Sendable {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private var knownCachedKeys: Set<String> = []
+    private var cachedHeadlinesByKey: [String: String] = [:]
 
     public init(baseDirectory: URL? = nil) {
         let root = baseDirectory
@@ -28,6 +29,17 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
         self.decoder = dec
+
+        // Warm in-memory cache key index via directory listing only (no file content reads).
+        if let files = try? FileManager.default.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for file in files where file.pathExtension.lowercased() == "json" {
+                knownCachedKeys.insert(file.deletingPathExtension().lastPathComponent)
+            }
+        }
     }
 
     public static func cacheKey(forMessageID rawMessageID: String) -> String {
@@ -50,6 +62,16 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         return knownCachedKeys.contains(key)
     }
 
+    /// Zero-disk-I/O headline lookup for `MEMessageDecoder.decodedMessage(forMessageData:)` banner rendering.
+    public func cachedHeadlineInMemory(forMessageID messageID: String) -> String? {
+        let normalized = ParsedEmailContext.normalizeMessageID(messageID)
+        guard !normalized.isEmpty else { return nil }
+        let key = Self.cacheKey(forMessageID: normalized)
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedHeadlinesByKey[key]
+    }
+
     /// Synchronous disk existence check for UI / HostApp / tests.
     public func hasCachedAnalysis(forMessageID messageID: String) -> Bool {
         let normalized = ParsedEmailContext.normalizeMessageID(messageID)
@@ -63,6 +85,7 @@ public final class AnalysisCacheStore: @unchecked Sendable {
             knownCachedKeys.insert(key)
         } else {
             knownCachedKeys.remove(key)
+            cachedHeadlinesByKey.removeValue(forKey: key)
         }
         return exists
     }
@@ -77,10 +100,12 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         defer { lock.unlock() }
         guard let data = try? Data(contentsOf: url) else {
             knownCachedKeys.remove(key)
+            cachedHeadlinesByKey.removeValue(forKey: key)
             return nil
         }
         if let decoded = try? decoder.decode(EmailAIAnalysis.self, from: data) {
             knownCachedKeys.insert(key)
+            cachedHeadlinesByKey[key] = decoded.headline
             return decoded
         }
         return nil
@@ -101,6 +126,7 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
         knownCachedKeys.insert(key)
+        cachedHeadlinesByKey[key] = toPersist.headline
     }
 
     public func remove(forMessageID messageID: String) {
@@ -113,6 +139,7 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         defer { lock.unlock() }
         try? FileManager.default.removeItem(at: url)
         knownCachedKeys.remove(key)
+        cachedHeadlinesByKey.removeValue(forKey: key)
     }
 
     @discardableResult
@@ -120,6 +147,7 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         knownCachedKeys.removeAll()
+        cachedHeadlinesByKey.removeAll()
         guard let files = try? FileManager.default.contentsOfDirectory(at: cacheDirectory, includingPropertiesForKeys: nil) else {
             return 0
         }

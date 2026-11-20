@@ -4,8 +4,8 @@ import OSLog
 
 /// Uses `MEMessageSecurityHandler` + `MEDecodedMessageBanner` strictly for read-only local MIME extraction
 /// and presenting the "AI 汇总分析" top banner button.
-/// Never signs, encrypts, decrypts, or alters any email payload (`rawData` is returned as `nil` so Mail
-/// keeps its original message bytes untouched without re-serializing multi-MB payloads over XPC).
+/// Never signs, encrypts, decrypts, or alters any email payload (`rawData` returns the original `data` bytes
+/// unchanged so Apple Mail renders the full body alongside our banner, while skipping >25 MB messages).
 final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @unchecked Sendable {
     nonisolated static let shared = MessageSecurityHandler()
 
@@ -13,10 +13,16 @@ final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @uncheck
         let value: Value
     }
 
+    /// Maximum raw MIME payload passed back via `MEDecodedMessage(data:)` over XPC (25 MB).
+    nonisolated static let maxPassthroughRawBytes = 25 * 1024 * 1024
+
     /// Maximum JSON bytes placed into `MEDecodedMessage.context` for XPC transport.
     private nonisolated static let maxXPCContextBytes = 16 * 1024
 
-    nonisolated override init() {
+    private let cacheStore: AnalysisCacheStore
+
+    nonisolated init(cacheStore: AnalysisCacheStore = .shared) {
+        self.cacheStore = cacheStore
         super.init()
     }
 
@@ -63,6 +69,13 @@ final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @uncheck
             return nil
         }
 
+        if data.count > Self.maxPassthroughRawBytes {
+            ExtensionLogger.security.warning(
+                "decodedMessage skipped: raw payload exceeds \(Self.maxPassthroughRawBytes, privacy: .public) bytes (\(data.count, privacy: .public)); letting Mail render natively"
+            )
+            return nil
+        }
+
         // Leave S/MIME and PGP encrypted or signed envelopes untouched so Mail's native security pipeline handles them.
         if MIMEParser.isProtectedSecurityEnvelope(data) {
             ExtensionLogger.security.debug("decodedMessage skipped: protected S/MIME or PGP envelope (bytes=\(data.count, privacy: .public))")
@@ -79,10 +92,17 @@ final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @uncheck
         let contextData = makeCompactXPCContextData(for: parsed)
 
         // Check in-memory cache hint only (no synchronous disk I/O on Mail's decode hot path).
-        let hasCached = AnalysisCacheStore.shared.hasCachedAnalysisInMemory(forMessageID: parsed.messageID)
+        let cachedHeadline = cacheStore.cachedHeadlineInMemory(forMessageID: parsed.messageID)
+        let hasCached = cachedHeadline != nil || cacheStore.hasCachedAnalysisInMemory(forMessageID: parsed.messageID)
         let attachmentSuffix = parsed.attachments.isEmpty ? "" : " · \(parsed.attachments.count) 附件"
-        let cacheSuffix = hasCached ? " · 已缓存" : ""
-        let bannerTitle = "AI 邮件助手 · 本地已提取正文\(attachmentSuffix)\(cacheSuffix)"
+        let bannerTitle: String
+        if let headline = cachedHeadline?.trimmingCharacters(in: .whitespacesAndNewlines), !headline.isEmpty {
+            let headlineShort = headline.count > 56 ? String(headline.prefix(55)) + "…" : headline
+            bannerTitle = "AI 已分析：\(headlineShort)\(attachmentSuffix)"
+        } else {
+            let cacheSuffix = hasCached ? " · 已缓存" : ""
+            bannerTitle = "AI 邮件助手 · 本地已提取正文\(attachmentSuffix)\(cacheSuffix)"
+        }
 
         let banner = MEDecodedMessageBanner(
             title: bannerTitle,
@@ -108,10 +128,10 @@ final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @uncheck
             )
         }
 
-        // Return `data: nil` so Apple Mail uses its own original unmodified MIME bytes directly,
-        // avoiding multi-MB XPC round-trip copies and Mail.app MIME re-decode crashes.
+        // Pass `data` back unchanged: per MailKit's `MEDecodedMessage` contract, returning a non-nil
+        // `MEDecodedMessage` with `rawData == nil` causes Mail to render an empty body.
         return MEDecodedMessage(
-            data: nil,
+            data: data,
             securityInformation: securityInfo,
             context: contextData,
             banner: banner
