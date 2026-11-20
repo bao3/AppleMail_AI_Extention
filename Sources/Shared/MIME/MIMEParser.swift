@@ -234,7 +234,11 @@ public enum MIMEParser {
 
         if isExplicitAttachment || (!isTextPart && filename != nil) || (!isTextPart && !contentType.mimeType.isEmpty && contentType.mimeType != "text/plain") {
             let resolvedName = filename ?? defaultFilename(forMimeType: contentType.mimeType)
-            let approxBytes = approximateDecodedSize(rawSize: bodyData.count, transferEncoding: transferEncoding)
+            let decodedApprox = approximateDecodedSize(rawSize: bodyData.count, transferEncoding: transferEncoding)
+            let appleLength = bodyData.isEmpty
+                ? (headers["x-apple-content-length"].flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0)
+                : 0
+            let approxBytes = bodyData.isEmpty && appleLength > 0 ? appleLength : decodedApprox
             let summary = AttachmentSummary(
                 filename: resolvedName,
                 mimeType: contentType.mimeType,

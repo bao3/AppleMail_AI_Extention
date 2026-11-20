@@ -192,4 +192,13 @@ final class MailHighlightedTextTests: XCTestCase {
         XCTAssertGreaterThan(narrowHost.fittingSize.height, wideHost.fittingSize.height)
         XCTAssertLessThanOrEqual(narrowHost.fittingSize.width, 221)
     }
+
+    func testPlainTextStripsInlineMarkersCleanly() {
+        XCTAssertEqual(
+            MailHighlightedText.plainText(exactExample),
+            "客户认为当前提供的漏洞管理PPT（Moxa_ENISA_SRP）内容过于简单，明确要求提供详细漏洞管理流程的正式PDF文档。"
+        )
+        XCTAssertEqual(MailHighlightedText.plainText("==紧急== **处理** `TN-4908`"), "紧急 处理 TN-4908")
+        XCTAssertEqual(MailHighlightedText.plainText("进度==未闭合"), "进度==未闭合")
+    }
 }

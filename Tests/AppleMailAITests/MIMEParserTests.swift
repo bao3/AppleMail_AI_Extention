@@ -191,11 +191,88 @@ final class MIMEParserTests: XCTestCase {
         XCTAssertTrue(decodedWithHeadline?.banner?.title.hasPrefix("AI 已分析：") == true)
         XCTAssertTrue(decodedWithHeadline?.banner?.title.contains("…") == true)
 
-        // Fresh store warms only key index from disk without reading JSON contents
+        // Fresh store warms only key index on init, then resolves persisted headline from disk on demand and strips inline markers
         let warmedStore = AnalysisCacheStore(baseDirectory: tempDir)
+        XCTAssertNil(warmedStore.cachedHeadlineInMemory(forMessageID: "banner-headline-test@moxa.com"))
         let warmedHandler = MessageSecurityHandler(cacheStore: warmedStore)
         let decodedWarmed = warmedHandler.decodedMessage(forMessageData: rawData)
-        XCTAssertEqual(decodedWarmed?.banner?.title, "AI 邮件助手 · 本地已提取正文 · 已缓存")
+        XCTAssertTrue(decodedWarmed?.banner?.title.hasPrefix("AI 已分析：") == true)
+        XCTAssertTrue(decodedWarmed?.banner?.title.contains("…") == true)
+
+        // Empty-headline cached entry falls back to "· 已缓存"
+        let emptyHeadlineEML = Data("""
+        Message-ID: <banner-empty-headline@moxa.com>
+        From: Alice <alice@moxa.com>
+        Subject: Empty headline cache test
+        Content-Type: text/plain; charset="UTF-8"
+
+        Body text.
+        """.utf8)
+        try tempStore.save(
+            EmailAIAnalysis(
+                headline: "   ",
+                coreConclusions: ["结论"],
+                todos: [],
+                businessElements: BusinessElements(),
+                plainChineseTranslation: "",
+                timeline: [],
+                messageID: "banner-empty-headline@moxa.com",
+                modelUsed: GeminiModel.flash38.rawValue
+            ),
+            forMessageID: "banner-empty-headline@moxa.com"
+        )
+        let decodedEmpty = handler.decodedMessage(forMessageData: emptyHeadlineEML)
+        XCTAssertEqual(decodedEmpty?.banner?.title, "AI 邮件助手 · 本地已提取正文 · 已缓存")
+
+        // Marked headline is stripped cleanly in banner title
+        let markedEML = Data("""
+        Message-ID: <banner-marked-headline@moxa.com>
+        From: Alice <alice@moxa.com>
+        Subject: Marked headline test
+        Content-Type: text/plain; charset="UTF-8"
+
+        Body text.
+        """.utf8)
+        try tempStore.save(
+            EmailAIAnalysis(
+                headline: "==紧急==请审批 `EDS-4012` **特价**",
+                coreConclusions: ["审批"],
+                todos: [],
+                businessElements: BusinessElements(),
+                plainChineseTranslation: "",
+                timeline: [],
+                messageID: "banner-marked-headline@moxa.com",
+                modelUsed: "group/smart-split"
+            ),
+            forMessageID: "banner-marked-headline@moxa.com"
+        )
+        let decodedMarked = handler.decodedMessage(forMessageData: markedEML)
+        XCTAssertEqual(decodedMarked?.banner?.title, "AI 已分析：紧急请审批 EDS-4012 特价")
+    }
+
+    func testPartialEmlxAppleContentLengthAttachmentFallback() {
+        let partialEml = Data("""
+        Message-ID: <partial-att-test@moxa.com>
+        Subject: Partial EMLX Test
+        MIME-Version: 1.0
+        Content-Type: multipart/mixed; boundary="PARTIALB"
+
+        --PARTIALB
+        Content-Type: text/plain; charset="UTF-8"
+
+        Body present.
+        --PARTIALB
+        Content-Type: application/pdf; name="Quote.pdf"
+        Content-Disposition: attachment; filename="Quote.pdf"
+        X-Apple-Content-Length: 245760
+
+        --PARTIALB--
+        """.utf8)
+
+        let parsed = MIMEParser.parse(rawData: partialEml)
+        XCTAssertEqual(parsed.attachments.count, 1)
+        XCTAssertEqual(parsed.attachments.first?.filename, "Quote.pdf")
+        XCTAssertEqual(parsed.attachments.first?.approximateSizeBytes, 245760)
     }
 
     func testSecurityHandlerStoresRawDataOnlyForNonInlineAttachments() {

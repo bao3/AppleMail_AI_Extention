@@ -116,6 +116,16 @@ public struct MailHighlightedText: View {
         return segments
     }
 
+    /// Strips semantic inline highlight markers (`==...==`, `**...**`, `` `...` ``) into clean plain text.
+    nonisolated public static func plainText(_ input: String) -> String {
+        parseSegments(input).map { segment in
+            switch segment {
+            case .plain(let value), .highlight(let value), .strong(let value), .code(let value):
+                return value
+            }
+        }.joined()
+    }
+
     /// Builds a SwiftUI-compatible `AttributedString` from inline-marked text.
     nonisolated public static func makeAttributedString(
         _ input: String,

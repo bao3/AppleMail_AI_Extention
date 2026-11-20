@@ -3,7 +3,11 @@ import Foundation
 
 /// Thread-safe local JSON cache keyed by SHA-256 of the normalized RFC 5322 `Message-ID`.
 public final class AnalysisCacheStore: @unchecked Sendable {
-    public static let shared = AnalysisCacheStore()
+    public static let shared = AnalysisCacheStore(warmHeadlinesAsync: true)
+
+    private struct HeadlinePreview: Decodable {
+        let headline: String?
+    }
 
     private let cacheDirectory: URL
     private let lock = NSLock()
@@ -12,7 +16,7 @@ public final class AnalysisCacheStore: @unchecked Sendable {
     private var knownCachedKeys: Set<String> = []
     private var cachedHeadlinesByKey: [String: String] = [:]
 
-    public init(baseDirectory: URL? = nil) {
+    public init(baseDirectory: URL? = nil, warmHeadlinesAsync: Bool = false) {
         let root = baseDirectory
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
@@ -38,6 +42,12 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         ) {
             for file in files where file.pathExtension.lowercased() == "json" {
                 knownCachedKeys.insert(file.deletingPathExtension().lastPathComponent)
+            }
+        }
+
+        if warmHeadlinesAsync {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.warmHeadlinesFromDisk()
             }
         }
     }
@@ -70,6 +80,69 @@ public final class AnalysisCacheStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return cachedHeadlinesByKey[key]
+    }
+
+    /// Reads headlines from all existing `.json` cache files into `cachedHeadlinesByKey`.
+    public func warmHeadlinesFromDisk() {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let localDecoder = JSONDecoder()
+        for file in files where file.pathExtension.lowercased() == "json" {
+            let key = file.deletingPathExtension().lastPathComponent
+            lock.lock()
+            let alreadyLoaded = cachedHeadlinesByKey[key] != nil
+            lock.unlock()
+            if alreadyLoaded { continue }
+
+            guard let data = try? Data(contentsOf: file),
+                  let preview = try? localDecoder.decode(HeadlinePreview.self, from: data)
+            else {
+                continue
+            }
+            lock.lock()
+            knownCachedKeys.insert(key)
+            if let headline = preview.headline {
+                cachedHeadlinesByKey[key] = headline
+            }
+            lock.unlock()
+        }
+    }
+
+    /// Returns an in-memory headline if available, otherwise performs a single per-file `stat` and lightweight decode
+    /// so externally pre-cached JSON summaries immediately show headlines on Mail banners without extension restart.
+    public func cachedOrDiskHeadline(forMessageID messageID: String) -> String? {
+        let normalized = ParsedEmailContext.normalizeMessageID(messageID)
+        guard !normalized.isEmpty else { return nil }
+        let key = Self.cacheKey(forMessageID: normalized)
+
+        lock.lock()
+        if let inMemory = cachedHeadlinesByKey[key] {
+            lock.unlock()
+            return inMemory
+        }
+        lock.unlock()
+
+        let url = fileURL(forMessageID: normalized)
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url)
+        else {
+            return nil
+        }
+
+        let preview = try? JSONDecoder().decode(HeadlinePreview.self, from: data)
+        lock.lock()
+        knownCachedKeys.insert(key)
+        if let headline = preview?.headline {
+            cachedHeadlinesByKey[key] = headline
+        }
+        lock.unlock()
+        return preview?.headline
     }
 
     /// Synchronous disk existence check for UI / HostApp / tests.

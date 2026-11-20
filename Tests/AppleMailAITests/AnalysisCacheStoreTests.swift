@@ -82,4 +82,47 @@ final class AnalysisCacheStoreTests: XCTestCase {
         XCTAssertFalse(store.hasCachedAnalysis(forMessageID: rawID))
         XCTAssertNil(store.cachedHeadlineInMemory(forMessageID: rawID))
     }
+
+    func testCachedOrDiskHeadlineAndWarmHeadlinesFromDisk() throws {
+        let msgID1 = "external-write-1@moxa.com"
+        let msgID2 = "external-write-2@moxa.com"
+
+        // Simulate an external writer persisting JSONs before any in-memory lookup
+        let writerStore = AnalysisCacheStore(baseDirectory: tempDir)
+        try writerStore.save(
+            EmailAIAnalysis(
+                headline: "紧急确认 `EDS-4012` **特价**",
+                coreConclusions: ["确认价格"],
+                todos: [],
+                businessElements: BusinessElements(),
+                plainChineseTranslation: "",
+                timeline: [],
+                messageID: msgID1,
+                modelUsed: "group/smart-split"
+            ),
+            forMessageID: msgID1
+        )
+        try writerStore.save(
+            EmailAIAnalysis(
+                headline: "第二个外部缓存结论",
+                coreConclusions: ["跟进交期"],
+                todos: [],
+                businessElements: BusinessElements(),
+                plainChineseTranslation: "",
+                timeline: [],
+                messageID: msgID2,
+                modelUsed: "group/smart-split"
+            ),
+            forMessageID: msgID2
+        )
+
+        let coldReader = AnalysisCacheStore(baseDirectory: tempDir)
+        XCTAssertNil(coldReader.cachedHeadlineInMemory(forMessageID: msgID1))
+        XCTAssertEqual(coldReader.cachedOrDiskHeadline(forMessageID: msgID1), "紧急确认 `EDS-4012` **特价**")
+        XCTAssertEqual(coldReader.cachedHeadlineInMemory(forMessageID: msgID1), "紧急确认 `EDS-4012` **特价**")
+
+        XCTAssertNil(coldReader.cachedHeadlineInMemory(forMessageID: msgID2))
+        coldReader.warmHeadlinesFromDisk()
+        XCTAssertEqual(coldReader.cachedHeadlineInMemory(forMessageID: msgID2), "第二个外部缓存结论")
+    }
 }

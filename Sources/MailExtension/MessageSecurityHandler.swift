@@ -94,14 +94,20 @@ final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @uncheck
         // Keep XPC context payload compact; full parsed context lives in ParsedEmailStore.shared.
         let contextData = makeCompactXPCContextData(for: parsed)
 
-        // Check in-memory cache hint only (no synchronous disk I/O on Mail's decode hot path).
-        let cachedHeadline = cacheStore.cachedHeadlineInMemory(forMessageID: parsed.messageID)
+        // Check in-memory cache first, with lightweight per-file disk fallback so externally pre-cached emails show headlines immediately.
+        let cachedHeadline = cacheStore.cachedOrDiskHeadline(forMessageID: parsed.messageID)
         let hasCached = cachedHeadline != nil || cacheStore.hasCachedAnalysisInMemory(forMessageID: parsed.messageID)
         let attachmentSuffix = parsed.attachments.isEmpty ? "" : " · \(parsed.attachments.count) 附件"
         let bannerTitle: String
-        if let headline = cachedHeadline?.trimmingCharacters(in: .whitespacesAndNewlines), !headline.isEmpty {
-            let headlineShort = headline.count > 56 ? String(headline.prefix(55)) + "…" : headline
-            bannerTitle = "AI 已分析：\(headlineShort)\(attachmentSuffix)"
+        if let rawHeadline = cachedHeadline {
+            let cleanedHeadline = MailHighlightedText.plainText(rawHeadline).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !cleanedHeadline.isEmpty {
+                let headlineShort = cleanedHeadline.count > 56 ? String(cleanedHeadline.prefix(55)) + "…" : cleanedHeadline
+                bannerTitle = "AI 已分析：\(headlineShort)\(attachmentSuffix)"
+            } else {
+                let cacheSuffix = hasCached ? " · 已缓存" : ""
+                bannerTitle = "AI 邮件助手 · 本地已提取正文\(attachmentSuffix)\(cacheSuffix)"
+            }
         } else {
             let cacheSuffix = hasCached ? " · 已缓存" : ""
             bannerTitle = "AI 邮件助手 · 本地已提取正文\(attachmentSuffix)\(cacheSuffix)"

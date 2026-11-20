@@ -685,4 +685,57 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         XCTAssertEqual(vm.editingProfile.id, "preset-openai")
         XCTAssertEqual(vm.editingProfile.fastModel, "gpt-4.1-mini")
     }
+
+    func testOpenAICompatibleLossyNumericFieldsDecodeCleanly() async throws {
+        let (defaults, suite) = makeIsolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let client = AIServiceClient(session: makeMockSession(), providerStore: AIProviderStore(userDefaults: defaults))
+        let magpieProfile = AIProviderProfile(
+            id: "magpie-test",
+            name: "Magpie",
+            kind: .openAICompatible,
+            baseURL: "http://192.168.50.60:3425/v1",
+            fastModel: "group/smart-split",
+            deepModel: "google-vertex/gemini-4-hydrogen"
+        )
+
+        StreamingMockURLProtocol.setHandler { request in
+            let inner = """
+            {
+              "headline": "TN-4908 报价确认",
+              "suggestedFlag": "yellow",
+              "flagReason": "报价跟进",
+              "coreConclusions": ["数量 60 台"],
+              "todos": [{"task": "确认报价单", "owner": "商务", "deadline": 1125, "dueDateISO": null, "priority": "high"}],
+              "businessElements": {
+                "projects": ["Wavelet"],
+                "customers": ["CRRC"],
+                "models": ["TN-4908-4GTX-WV-CT-T"],
+                "pricing": [{"itemOrModel": "TN-4908-4GTX-WV-CT-T", "quantity": 60, "unitPrice": 16350.5, "currency": "RMB", "termsOrLeadTime": 4, "notes": false}]
+              },
+              "plainChineseTranslation": "确认价格与数量。",
+              "timeline": [{"timeOrStep": 1, "actor": "销售", "summary": "提交特价"}]
+            }
+            """
+            let envelope: [String: Any] = ["choices": [["message": ["content": inner]]]]
+            let data = try JSONSerialization.data(withJSONObject: envelope)
+            let resp = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            return (resp, [data])
+        }
+
+        let result = try await client.analyzeEmail(
+            makeSampleEmail(),
+            profile: magpieProfile,
+            tier: .fast,
+            apiKeyOverride: "sk-magpie-test"
+        )
+        XCTAssertEqual(result.todos.first?.deadline, "1125")
+        XCTAssertNil(result.todos.first?.dueDateISO)
+        XCTAssertEqual(result.businessElements.pricing.first?.quantity, "60")
+        XCTAssertEqual(result.businessElements.pricing.first?.unitPrice, "16350.5")
+        XCTAssertEqual(result.businessElements.pricing.first?.termsOrLeadTime, "4")
+        XCTAssertEqual(result.businessElements.pricing.first?.notes, "false")
+        XCTAssertEqual(result.timeline.first?.timeOrStep, "1")
+    }
 }

@@ -88,12 +88,34 @@ targets:
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
       - sdk: libsqlite3.tbd
+  AppleMailAIBatch:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/Shared
+      - path: Sources/BatchCLI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI.BatchCLI
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        PROVISIONING_PROFILE_SPECIFIER: ""
+        ENABLE_HARDENED_RUNTIME: NO
+    dependencies:
+      - sdk: MailKit.framework
+      - sdk: EventKit.framework
+      - sdk: Security.framework
+      - sdk: AppKit.framework
+      - sdk: SwiftUI.framework
+      - sdk: libsqlite3.tbd
 schemes:
   AppleMailAI:
     build:
       targets:
         AppleMailAI: all
         MailAIExtension: all
+        AppleMailAIBatch: all
         AppleMailAITests: [test]
     test:
       targets:

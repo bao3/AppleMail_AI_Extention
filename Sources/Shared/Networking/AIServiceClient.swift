@@ -1194,45 +1194,75 @@ public final class AIServiceClient: Sendable {
 
     // MARK: - Resilient Model Decoding
 
+    private struct LossyString: Decodable {
+        let value: String?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if container.decodeNil() {
+                self.value = nil
+            } else if let str = try? container.decode(String.self) {
+                self.value = str
+            } else if let intVal = try? container.decode(Int64.self) {
+                self.value = String(intVal)
+            } else if let doubleVal = try? container.decode(Double.self) {
+                if doubleVal.isFinite,
+                   doubleVal.rounded() == doubleVal,
+                   doubleVal >= Double(Int64.min),
+                   doubleVal <= Double(Int64.max)
+                {
+                    self.value = String(Int64(doubleVal))
+                } else {
+                    self.value = String(doubleVal)
+                }
+            } else if let boolVal = try? container.decode(Bool.self) {
+                self.value = boolVal ? "true" : "false"
+            } else {
+                self.value = nil
+            }
+        }
+    }
+
     private struct ResilientTodoItem: Decodable {
-        let task: String?
-        let owner: String?
-        let deadline: String?
-        let dueDateISO: String?
-        let priority: String?
+        let task: LossyString?
+        let owner: LossyString?
+        let deadline: LossyString?
+        let dueDateISO: LossyString?
+        let priority: LossyString?
 
         func toEmailTodoItem() -> EmailTodoItem? {
-            let cleanTask = (task ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanTask = (task?.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleanTask.isEmpty else { return nil }
-            let cleanOwner = (owner ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanOwner = (owner?.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanPriority = (priority?.value ?? "medium").trimmingCharacters(in: .whitespacesAndNewlines)
             return EmailTodoItem(
                 task: cleanTask,
                 owner: cleanOwner.isEmpty ? "相关方" : cleanOwner,
-                deadline: deadline,
-                dueDateISO: dueDateISO,
-                priority: (priority ?? "medium").isEmpty ? "medium" : (priority ?? "medium")
+                deadline: deadline?.value,
+                dueDateISO: dueDateISO?.value,
+                priority: cleanPriority.isEmpty ? "medium" : cleanPriority
             )
         }
     }
 
     private struct ResilientPricingElement: Decodable {
-        let itemOrModel: String?
-        let quantity: String?
-        let unitPrice: String?
-        let currency: String?
-        let termsOrLeadTime: String?
-        let notes: String?
+        let itemOrModel: LossyString?
+        let quantity: LossyString?
+        let unitPrice: LossyString?
+        let currency: LossyString?
+        let termsOrLeadTime: LossyString?
+        let notes: LossyString?
 
         func toPricingElement() -> PricingElement? {
-            let item = (itemOrModel ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let item = (itemOrModel?.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !item.isEmpty else { return nil }
             return PricingElement(
                 itemOrModel: item,
-                quantity: quantity,
-                unitPrice: unitPrice,
-                currency: currency,
-                termsOrLeadTime: termsOrLeadTime,
-                notes: notes
+                quantity: quantity?.value,
+                unitPrice: unitPrice?.value,
+                currency: currency?.value,
+                termsOrLeadTime: termsOrLeadTime?.value,
+                notes: notes?.value
             )
         }
     }
@@ -1254,16 +1284,16 @@ public final class AIServiceClient: Sendable {
     }
 
     private struct ResilientTimelineEvent: Decodable {
-        let timeOrStep: String?
-        let actor: String?
-        let summary: String?
+        let timeOrStep: LossyString?
+        let actor: LossyString?
+        let summary: LossyString?
 
         func toTimelineEvent() -> TimelineEvent? {
-            let cleanSummary = (summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanSummary = (summary?.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleanSummary.isEmpty else { return nil }
             return TimelineEvent(
-                timeOrStep: timeOrStep ?? "",
-                actor: actor ?? "",
+                timeOrStep: timeOrStep?.value ?? "",
+                actor: actor?.value ?? "",
                 summary: cleanSummary
             )
         }
