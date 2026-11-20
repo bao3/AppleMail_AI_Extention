@@ -153,7 +153,8 @@ public struct ParsedEmailContext: Codable, Sendable, Hashable {
             lines.append("Attachments: \(desc.joined(separator: "; "))")
         }
 
-        let boundedBody = Self.truncate(plainBody, limit: maxBodyChars)
+        let cleanedBody = Self.strippingTrailingDisclaimer(plainBody)
+        let boundedBody = Self.truncate(cleanedBody, limit: maxBodyChars)
         lines.append("")
         lines.append("=== 最新正文 (Latest Message Body) ===")
         lines.append(boundedBody.isEmpty ? "(正文为空)" : boundedBody)
@@ -163,7 +164,8 @@ public struct ParsedEmailContext: Codable, Sendable, Hashable {
             var includedLines: [String] = []
             for block in quotedChain.prefix(maxQuoteBlocks) {
                 guard remainingQuoteBudget > 0 else { break }
-                let content = Self.truncate(block.content, limit: remainingQuoteBudget)
+                let cleanedQuote = Self.strippingTrailingDisclaimer(block.content)
+                let content = Self.truncate(cleanedQuote, limit: remainingQuoteBudget)
                 remainingQuoteBudget -= content.count
                 includedLines.append("--- 引用段 #\(block.index): \(Self.truncate(block.attribution, limit: 240)) ---")
                 includedLines.append(content)
@@ -178,6 +180,96 @@ public struct ParsedEmailContext: Codable, Sendable, Hashable {
             }
         }
         return lines.joined(separator: "\n")
+    }
+
+    private static let disclaimerAnchorRegexes: [NSRegularExpression] = [
+        #"(?i)^(?:[-_=*]{2,}\s*)?(?:confidentiality\s+notice|confidentiality\s+disclaimer|privilege\s+and\s+confidentiality(?:\s+notice)?|notice\s+of\s+confidentiality|legal\s+disclaimer|e-?mail\s+disclaimer)\b"#,
+        #"(?i)^this\s+(?:e-?mail|message|communication|transmission)(?:\s+and\s+any\s+(?:attachments?|files?)(?:\s+thereto|\s+transmitted\s+with\s+it)?)?\s+(?:is|are)\s+(?:strictly\s+)?(?:confidential|privileged|intended\s+(?:only|solely))\b"#,
+        #"(?i)^the\s+information\s+(?:contained|transmitted)\s+in\s+this\s+(?:e-?mail|message|transmission)\s+is\s+(?:strictly\s+)?(?:confidential|privileged|intended\s+(?:only|solely))\b"#,
+        #"(?i)^(?:important\s+notice|disclaimer)\s*[:\-]\s*this\s+(?:e-?mail|message|information)\b"#,
+        #"(?i)^please\s+consider\s+the\s+environment\s+before\s+printing\s+this\s+(?:e-?mail|email|message)\b"#,
+        #"^(?:保密声明|保密聲明|免责声明|免責聲明|机密声明|機密聲明)\s*[:：]"#,
+        #"^(?:本邮件|本電子郵件|本电子邮件|此邮件|本郵件)(?:及其|及任何|及所附|內容|内容).*?(?:机密|保密|機密|仅供指定收件人)"#
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+
+    private static let conditionalRecipientRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"(?i)^if\s+you\s+(?:are\s+not|have\s+received\s+this\s+(?:e-?mail|message)\s+in\s+error)\b"#
+    )
+
+    private static let separatorLineRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"^\s*[-_=*~]{2,}\s*$"#
+    )
+
+    /// Removes trailing legal/confidentiality boilerplate disclaimers while preserving genuine email content.
+    public static func strippingTrailingDisclaimer(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        guard !lines.isEmpty else { return "" }
+
+        var cutIndex: Int?
+        let maxTrailingBoilerplateChars = 2_800
+
+        for idx in lines.indices {
+            let trimmed = lines[idx].trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            let tail = lines[idx...].joined(separator: "\n")
+            guard tail.count <= maxTrailingBoilerplateChars else { continue }
+
+            let nsLine = trimmed as NSString
+            let range = NSRange(location: 0, length: nsLine.length)
+
+            let matchesStrongAnchor = disclaimerAnchorRegexes.contains {
+                $0.firstMatch(in: trimmed, options: [], range: range) != nil
+            }
+
+            let matchesRecipientFallback: Bool
+            if !matchesStrongAnchor,
+               let condRegex = conditionalRecipientRegex,
+               condRegex.firstMatch(in: trimmed, options: [], range: range) != nil
+            {
+                let lowerTail = tail.lowercased()
+                matchesRecipientFallback = lowerTail.contains("confidential")
+                    || lowerTail.contains("delete")
+                    || lowerTail.contains("notify")
+                    || lowerTail.contains("prohibited")
+                    || lowerTail.contains("unauthorized")
+            } else {
+                matchesRecipientFallback = false
+            }
+
+            if matchesStrongAnchor || matchesRecipientFallback {
+                cutIndex = idx
+                break
+            }
+        }
+
+        guard var finalCut = cutIndex else {
+            return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        // Also drop blank lines and horizontal separator lines immediately preceding the disclaimer block
+        while finalCut > 0 {
+            let prev = lines[finalCut - 1].trimmingCharacters(in: .whitespaces)
+            if prev.isEmpty {
+                finalCut -= 1
+                continue
+            }
+            if let sepRegex = separatorLineRegex {
+                let nsPrev = prev as NSString
+                if sepRegex.firstMatch(in: prev, options: [], range: NSRange(location: 0, length: nsPrev.length)) != nil {
+                    finalCut -= 1
+                    continue
+                }
+            }
+            break
+        }
+
+        return lines[..<finalCut]
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func truncate(_ text: String, limit: Int) -> String {

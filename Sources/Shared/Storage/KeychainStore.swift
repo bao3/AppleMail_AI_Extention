@@ -25,24 +25,54 @@ public enum KeychainError: LocalizedError {
 /// Manages Vertex AI API Key & preferred model in the macOS Login Keychain.
 /// Uses the file-based Keychain (no `kSecUseDataProtectionKeychain` / `keychain-access-groups`)
 /// so both the sandboxed host app and MailKit appex work cleanly with Apple Development signing.
-public final class KeychainStore: Sendable {
+public final class KeychainStore: @unchecked Sendable {
     public static let shared = KeychainStore()
 
     public static let defaultService = "com.bao3.AppleMailAI.vertex-api-key"
     public static let apiKeyAccount = "vertex-api-key"
     public static let modelPrefAccount = "preferred-gemini-model"
-    private static let userDefaultsModelKey = "com.bao3.AppleMailAI.preferredModel"
-    private static let userDefaultsProjectIDKey = "com.bao3.AppleMailAI.vertexProjectID"
+    public static let userDefaultsModelKey = "com.bao3.AppleMailAI.preferredModel"
+    public static let userDefaultsProjectIDKey = "com.bao3.AppleMailAI.vertexProjectID"
 
     public let service: String
+    private let userDefaults: UserDefaults
 
-    public init(service: String = KeychainStore.defaultService) {
+    public init(service: String = KeychainStore.defaultService, userDefaults: UserDefaults = .standard) {
         self.service = service
+        self.userDefaults = userDefaults
     }
 
-    // MARK: - API Key
+    public static func accountName(forProfileID profileID: String) -> String {
+        let trimmed = profileID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == AIProviderProfile.defaultVertexProfileID {
+            return apiKeyAccount
+        }
+        return "provider-key-\(trimmed)"
+    }
+
+    // MARK: - API Key (Default Vertex Profile & Per-Profile)
 
     public func saveAPIKey(_ rawKey: String) throws {
+        try saveAPIKey(rawKey, forProfileID: AIProviderProfile.defaultVertexProfileID)
+    }
+
+    public func loadAPIKey() -> String? {
+        loadAPIKey(forProfileID: AIProviderProfile.defaultVertexProfileID)
+    }
+
+    public func deleteAPIKey() throws {
+        try deleteAPIKey(forProfileID: AIProviderProfile.defaultVertexProfileID)
+    }
+
+    public func hasAPIKey() -> Bool {
+        hasAPIKey(forProfileID: AIProviderProfile.defaultVertexProfileID)
+    }
+
+    public func maskedAPIKeyStatus() -> String? {
+        maskedAPIKeyStatus(forProfileID: AIProviderProfile.defaultVertexProfileID)
+    }
+
+    public func saveAPIKey(_ rawKey: String, forProfileID profileID: String) throws {
         let trimmed = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw KeychainError.emptyAPIKey
@@ -50,11 +80,12 @@ public final class KeychainStore: Sendable {
         guard let data = trimmed.data(using: .utf8) else {
             throw KeychainError.unexpectedData
         }
-        try upsertGenericPassword(data: data, account: Self.apiKeyAccount)
+        try upsertGenericPassword(data: data, account: Self.accountName(forProfileID: profileID))
     }
 
-    public func loadAPIKey() -> String? {
-        guard let data = readGenericPasswordData(account: Self.apiKeyAccount),
+    public func loadAPIKey(forProfileID profileID: String) -> String? {
+        let account = Self.accountName(forProfileID: profileID)
+        guard let data = readGenericPasswordData(account: account),
               let str = String(data: data, encoding: .utf8)
         else {
             return nil
@@ -63,16 +94,16 @@ public final class KeychainStore: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    public func deleteAPIKey() throws {
-        try deleteGenericPassword(account: Self.apiKeyAccount)
+    public func deleteAPIKey(forProfileID profileID: String) throws {
+        try deleteGenericPassword(account: Self.accountName(forProfileID: profileID))
     }
 
-    public func hasAPIKey() -> Bool {
-        loadAPIKey() != nil
+    public func hasAPIKey(forProfileID profileID: String) -> Bool {
+        loadAPIKey(forProfileID: profileID) != nil
     }
 
-    public func maskedAPIKeyStatus() -> String? {
-        guard let key = loadAPIKey() else { return nil }
+    public func maskedAPIKeyStatus(forProfileID profileID: String) -> String? {
+        guard let key = loadAPIKey(forProfileID: profileID) else { return nil }
         if key.count <= 10 {
             return "•••• (已存入 Keychain)"
         }
@@ -86,7 +117,7 @@ public final class KeychainStore: Sendable {
     /// Stored in UserDefaults (non-secret) to avoid cross-binary Login Keychain ACL prompts/blocks
     /// when the sandboxed MailKit `.appex` initializes its popover UI.
     public func loadPreferredModel() -> GeminiModel {
-        if let raw = UserDefaults.standard.string(forKey: Self.userDefaultsModelKey),
+        if let raw = userDefaults.string(forKey: Self.userDefaultsModelKey),
            let model = GeminiModel(rawValue: raw)
         {
             return model
@@ -95,13 +126,13 @@ public final class KeychainStore: Sendable {
     }
 
     public func savePreferredModel(_ model: GeminiModel) {
-        UserDefaults.standard.set(model.rawValue, forKey: Self.userDefaultsModelKey)
+        userDefaults.set(model.rawValue, forKey: Self.userDefaultsModelKey)
     }
 
     // MARK: - Vertex AI GCP Project ID
 
     public func loadProjectID() -> String {
-        if let stored = UserDefaults.standard.string(forKey: Self.userDefaultsProjectIDKey)?
+        if let stored = userDefaults.string(forKey: Self.userDefaultsProjectIDKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !stored.isEmpty
         {
@@ -119,9 +150,9 @@ public final class KeychainStore: Sendable {
     public func saveProjectID(_ rawProjectID: String) {
         let trimmed = rawProjectID.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.userDefaultsProjectIDKey)
+            userDefaults.removeObject(forKey: Self.userDefaultsProjectIDKey)
         } else {
-            UserDefaults.standard.set(trimmed, forKey: Self.userDefaultsProjectIDKey)
+            userDefaults.set(trimmed, forKey: Self.userDefaultsProjectIDKey)
         }
     }
 
