@@ -6,15 +6,15 @@ import OSLog
 /// and presenting the "AI 汇总分析" top banner button.
 /// Never signs, encrypts, decrypts, or alters any email payload (`rawData` is returned as `nil` so Mail
 /// keeps its original message bytes untouched without re-serializing multi-MB payloads over XPC).
-final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler {
-    static let shared = MessageSecurityHandler()
+final class MessageSecurityHandler: NSObject, MEMessageSecurityHandler, @unchecked Sendable {
+    nonisolated static let shared = MessageSecurityHandler()
 
     private struct SendableBox<Value>: @unchecked Sendable {
         let value: Value
     }
 
     /// Maximum JSON bytes placed into `MEDecodedMessage.context` for XPC transport.
-    private static let maxXPCContextBytes = 16 * 1024
+    private nonisolated static let maxXPCContextBytes = 16 * 1024
 
     nonisolated override init() {
         super.init()
