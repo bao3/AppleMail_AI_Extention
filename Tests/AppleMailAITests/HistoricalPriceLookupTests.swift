@@ -1,6 +1,26 @@
+import AppKit
 import Foundation
 import SQLite3
 import XCTest
+
+@MainActor
+private final class MockServiceParentViewController: NSViewController {
+    var invalidateCallCount = 0
+    var invalidatedAt: CFAbsoluteTime?
+    var onInvalidate: (() -> Void)?
+
+    @objc func invalidate() {
+        invalidateCallCount += 1
+        invalidatedAt = CFAbsoluteTimeGetCurrent()
+        onInvalidate?()
+    }
+}
+
+@MainActor
+private final class OpenedURLRecorder {
+    var openedURLs: [URL] = []
+    var openedAt: CFAbsoluteTime?
+}
 
 final class HistoricalPriceLookupTests: XCTestCase {
     private var tempDir: URL!
@@ -822,6 +842,74 @@ final class HistoricalPriceLookupTests: XCTestCase {
         XCTAssertEqual(record.occurrenceCount, 2)
         XCTAssertEqual(record.customerOrg, "客户甲、客户乙")
         XCTAssertEqual(record.projectName, "2026 Q4 FEP 统计")
+    }
+
+    // MARK: - Popover Dismissal & Jump Handoff
+
+    @MainActor
+    func testMessageAnalysisViewControllerDismissesServicePopoverBeforeOpeningJumpURL() async throws {
+        let parent = MockServiceParentViewController(nibName: nil, bundle: nil)
+        let recorder = OpenedURLRecorder()
+        let invalidatedExpectation = expectation(description: "Mock service parent invalidated")
+        let openedExpectation = expectation(description: "Target message URL opened")
+        let targetURL = try XCTUnwrap(URL(string: "message://%3Ctest-123@moxa.com%3E"))
+
+        weak var weakVC: MessageAnalysisViewController?
+        do {
+            let vc = MessageAnalysisViewController(
+                emailContext: makeEmail(subject: "报价参考", plainBody: "正文"),
+                openDelaySeconds: 0.08,
+                urlOpener: { url in
+                    recorder.openedURLs.append(url)
+                    recorder.openedAt = CFAbsoluteTimeGetCurrent()
+                    openedExpectation.fulfill()
+                }
+            )
+            weakVC = vc
+            parent.addChild(vc)
+            parent.onInvalidate = { [weak vc] in
+                vc?.removeFromParent()
+                invalidatedExpectation.fulfill()
+            }
+
+            vc.dismissPopoverAndOpenURL(targetURL)
+            // Double-click in the same frame must be deduplicated cleanly.
+            vc.dismissPopoverAndOpenURL(targetURL)
+        }
+
+        await fulfillment(of: [invalidatedExpectation, openedExpectation], timeout: 1.0)
+        parent.onInvalidate = nil
+
+        XCTAssertEqual(parent.invalidateCallCount, 1)
+        XCTAssertEqual(recorder.openedURLs, [targetURL])
+        let invalidatedAt = try XCTUnwrap(parent.invalidatedAt)
+        let openedAt = try XCTUnwrap(recorder.openedAt)
+        XCTAssertLessThanOrEqual(invalidatedAt, openedAt)
+        XCTAssertNil(weakVC)
+    }
+
+    @MainActor
+    func testMessageAnalysisViewControllerPlainParentDoesNotThrowAndStillOpensURL() async throws {
+        let plainParent = NSViewController(nibName: nil, bundle: nil)
+        let recorder = OpenedURLRecorder()
+        let openedExpectation = expectation(description: "Fallback URL opened cleanly")
+
+        let vc = MessageAnalysisViewController(
+            emailContext: makeEmail(subject: "报价参考", plainBody: "正文"),
+            openDelaySeconds: 0.03,
+            urlOpener: { url in
+                recorder.openedURLs.append(url)
+                recorder.openedAt = CFAbsoluteTimeGetCurrent()
+                openedExpectation.fulfill()
+            }
+        )
+        plainParent.addChild(vc)
+
+        let targetURL = try XCTUnwrap(URL(string: "message://%3Cplain-parent@moxa.com%3E"))
+        vc.dismissPopoverAndOpenURL(targetURL)
+
+        await fulfillment(of: [openedExpectation], timeout: 1.0)
+        XCTAssertEqual(recorder.openedURLs, [targetURL])
     }
 
     // MARK: - Helpers

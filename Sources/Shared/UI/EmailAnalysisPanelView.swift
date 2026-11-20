@@ -271,14 +271,19 @@ final class EmailAnalysisViewModel: ObservableObject {
 
 public struct EmailAnalysisPanelView: View {
     @StateObject private var vm: EmailAnalysisViewModel
+    private let onOpenExternalURL: (@MainActor (URL) -> Void)?
     @State private var showKeychainSheet = false
     @State private var showAttachmentFilingSheet = false
     @State private var filingFocusFilename: String?
     @State private var showRawLocalExtraction = false
     @State private var expandedPriceSKUs: Set<String> = []
 
-    public init(email: ParsedEmailContext) {
+    public init(
+        email: ParsedEmailContext,
+        onOpenExternalURL: (@MainActor (URL) -> Void)? = nil
+    ) {
         _vm = StateObject(wrappedValue: EmailAnalysisViewModel(email: email))
+        self.onOpenExternalURL = onOpenExternalURL
     }
 
     public var body: some View {
@@ -641,7 +646,7 @@ public struct EmailAnalysisPanelView: View {
             if vm.reminderPermissionDenied {
                 Button("打开系统设置") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders") {
-                        NSWorkspace.shared.open(url)
+                        openExternalURL(url)
                     }
                 }
                 .controlSize(.mini)
@@ -981,7 +986,7 @@ public struct EmailAnalysisPanelView: View {
 
             if let jumpURL = record.mailJumpURL {
                 Button {
-                    NSWorkspace.shared.open(jumpURL)
+                    openExternalURL(jumpURL)
                 } label: {
                     Image(systemName: "arrow.up.forward.app")
                         .font(.system(size: 12))
@@ -1267,5 +1272,15 @@ public struct EmailAnalysisPanelView: View {
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 14)
         .padding(.vertical, 6)
+    }
+
+    private func openExternalURL(_ url: URL) {
+        if let onOpenExternalURL {
+            onOpenExternalURL(url)
+        } else {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = true
+            NSWorkspace.shared.open(url, configuration: config, completionHandler: nil)
+        }
     }
 }
