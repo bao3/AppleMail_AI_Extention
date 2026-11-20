@@ -601,6 +601,229 @@ final class HistoricalPriceLookupTests: XCTestCase {
         XCTAssertEqual(group.records.map(\.quoteDateISO), ["2026-10-21", "2026-01-15", "2025-08-05"])
     }
 
+    func testMergesSameThreadAndSameSubjectWithIdenticalPriceAcrossMultipleCustomers() async throws {
+        try buildMockOutlookDatabase(at: dbURL) { db in
+            // 1. Six replies in the same Q4 FEP group-buy thread/subject at RMB 900.0 across 6 distributors
+            let q4Replies: [(id: String, subject: String, topic: String, date: String, cust: String)] = [
+                ("q4-1@moxajxtd.com", "2026 第四季度 Q4  FEP 数量统计", "2026 第四季度 Q4  FEP 数量统计", "2026-11-13", "北京佳信通达"),
+                ("q4-2@qq.com", "Re: 2026 第四季度 Q4  FEP 数量统计", "2026 第四季度 Q4  FEP 数量统计", "2026-10-30", "浙江中自庆安 (WindIT)"),
+                ("q4-3@haitun.com", "回复：2026 第四季度 Q4 FEP 数量统计", "2026 第四季度 Q4  FEP 数量统计", "2026-10-29", "郑州海豚科技"),
+                ("q4-4@vip.163.com", "FW: [External] 2026 第四季度 Q4 FEP 数量统计", "2026 第四季度 Q4  FEP 数量统计", "2026-10-27", "北京时代佳业"),
+                ("q4-5@mingit.com", "Re: 2026 第四季度 Q4 FEP 数量统计 - 补充", "2026 第四季度 Q4  FEP 数量统计", "2026-10-27", "南京明高科技,深圳市海豚科技"),
+                ("q4-6@moxa.com", "回复: 2026 第四季度 Q4 FEP 数量统计", "", "2026-10-19", "")
+            ]
+
+            for item in q4Replies {
+                let msgID = try insertMessage(
+                    db: db,
+                    messageID: item.id,
+                    subject: item.subject,
+                    threadTopic: item.topic,
+                    dateISO: item.date,
+                    projectName: "",
+                    customerOrg: item.cust
+                )
+                try insertPrice(
+                    db: db,
+                    messageRowID: msgID,
+                    sku: "DE-LN04-RJ",
+                    currency: "RMB",
+                    unitPrice: 900.0,
+                    quantity: nil,
+                    priceType: "quote",
+                    taxMode: "未税",
+                    customerOrg: item.cust,
+                    projectName: "",
+                    quoteDateISO: item.date,
+                    evidenceSnippet: "DE-LN04-RJ: 900 CNY/pc(未稅)",
+                    confidence: "high"
+                )
+            }
+
+            // 2. Bogus tiny-integer RMB artifact parsed from SKU "DE-LN04-RJ" digits when real snippet price is 705/900
+            let bogusMsgID = try insertMessage(
+                db: db,
+                messageID: "bogus-sku-digit@moxa.com",
+                subject: "MCN FEP 机型 DA-682B 的价格调整共识",
+                threadTopic: "MCN FEP 机型 DA-682B 的价格调整共识",
+                dateISO: "2026-06-11",
+                projectName: "",
+                customerOrg: ""
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: bogusMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 4.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "",
+                projectName: "",
+                quoteDateISO: "2026-06-11",
+                evidenceSnippet: "价格未税: DE-LN04-RJ: 705 CNY/pc(未稅) | DE-LN04-RJ: 900 CNY/pc(未稅)",
+                confidence: "high"
+            )
+
+            // 3. Same subject/thread with DIFFERENT prices (RMB 700 vs RMB 800) must stay separate
+            let multiPriceMsgID = try insertMessage(
+                db: db,
+                messageID: "rule-prices@moxa.com",
+                subject: "FEP季度统一采购规则",
+                threadTopic: "FEP季度统一采购规则",
+                dateISO: "2026-01-04",
+                projectName: "",
+                customerOrg: "深圳市海豚科技"
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: multiPriceMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 700.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "深圳市海豚科技",
+                projectName: "",
+                quoteDateISO: "2026-01-04",
+                evidenceSnippet: "FEP季度统一采购规则 700 RMB",
+                confidence: "high"
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: multiPriceMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 800.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "深圳市海豚科技",
+                projectName: "",
+                quoteDateISO: "2026-01-04",
+                evidenceSnippet: "FEP季度统一采购规则 800 RMB",
+                confidence: "high"
+            )
+
+            // 4. Separate order price record at RMB 705
+            let orderMsgID = try insertMessage(
+                db: db,
+                messageID: "order-705@moxa.com",
+                subject: "【2026每周出货明细】",
+                threadTopic: "【2026每周出货明细】",
+                dateISO: "2026-10-21",
+                projectName: "地铁项目模块补订",
+                customerOrg: "杭州寰控物联智能技术有限公司"
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: orderMsgID,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 705.0,
+                quantity: 10,
+                priceType: "order_price",
+                taxMode: "未税",
+                customerOrg: "杭州寰控物联智能技术有限公司",
+                projectName: "地铁项目模块补订",
+                quoteDateISO: "2026-10-21",
+                evidenceSnippet: "DE-LN04-RJ 705 RMB",
+                confidence: "high"
+            )
+        }
+
+        let email = makeEmail(
+            subject: "核价：DE-LN04-RJ",
+            plainBody: "请核对 DE-LN04-RJ 特价与报价。"
+        )
+        let groups = await service.lookupRelatedPrices(for: email, runtimeDBPath: dbURL.path)
+        XCTAssertEqual(groups.count, 1)
+
+        let group = try XCTUnwrap(groups.first)
+        XCTAssertEqual(group.records.count, 4)
+        XCTAssertEqual(group.minUnitPrice ?? 0, 700.0, accuracy: 0.001)
+        XCTAssertEqual(group.maxUnitPrice ?? 0, 900.0, accuracy: 0.001)
+
+        // Bogus RMB 4.0 artifact must be filtered out
+        XCTAssertFalse(group.records.contains(where: { abs($0.unitPrice - 4.0) < 0.01 }))
+
+        let merged900 = try XCTUnwrap(group.records.first(where: { abs($0.unitPrice - 900.0) < 0.01 }))
+        XCTAssertEqual(merged900.occurrenceCount, 6)
+        XCTAssertEqual(merged900.quoteDateISO, "2026-11-13")
+        XCTAssertEqual(merged900.customerOrg, "北京佳信通达、浙江中自庆安 (WindIT) 等 6 家")
+        XCTAssertEqual(merged900.projectName, "2026 第四季度 Q4 FEP 数量统计")
+
+        // Distinct prices under same subject remain distinct
+        XCTAssertTrue(group.records.contains(where: { abs($0.unitPrice - 700.0) < 0.01 }))
+        XCTAssertTrue(group.records.contains(where: { abs($0.unitPrice - 800.0) < 0.01 }))
+        XCTAssertTrue(group.records.contains(where: { abs($0.unitPrice - 705.0) < 0.01 }))
+    }
+
+    func testSubjectNormalizationFallbackWithoutThreadTopicColumn() async throws {
+        try buildMockOutlookDatabase(at: dbURL, includeThreadTopic: false) { db in
+            let msg1 = try insertMessage(
+                db: db,
+                messageID: "legacy-1@moxa.com",
+                subject: "Re: 2026 Q4 FEP 统计",
+                dateISO: "2026-11-12",
+                projectName: "",
+                customerOrg: "客户甲",
+                hasThreadTopicColumn: false
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: msg1,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 900.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "客户甲",
+                projectName: "",
+                quoteDateISO: "2026-11-12",
+                evidenceSnippet: "900",
+                confidence: "high"
+            )
+
+            let msg2 = try insertMessage(
+                db: db,
+                messageID: "legacy-2@moxa.com",
+                subject: "回复：2026 Q4 FEP 统计",
+                dateISO: "2026-11-10",
+                projectName: "",
+                customerOrg: "客户乙",
+                hasThreadTopicColumn: false
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: msg2,
+                sku: "DE-LN04-RJ",
+                currency: "RMB",
+                unitPrice: 900.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "客户乙",
+                projectName: "",
+                quoteDateISO: "2026-11-10",
+                evidenceSnippet: "900",
+                confidence: "high"
+            )
+        }
+
+        let email = makeEmail(subject: "报价 DE-LN04-RJ", plainBody: "DE-LN04-RJ 报价")
+        let groups = await service.lookupRelatedPrices(for: email, runtimeDBPath: dbURL.path)
+        XCTAssertEqual(groups.count, 1)
+        let record = try XCTUnwrap(groups.first?.records.first)
+        XCTAssertEqual(groups.first?.records.count, 1)
+        XCTAssertEqual(record.occurrenceCount, 2)
+        XCTAssertEqual(record.customerOrg, "客户甲、客户乙")
+        XCTAssertEqual(record.projectName, "2026 Q4 FEP 统计")
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(
@@ -646,7 +869,11 @@ final class HistoricalPriceLookupTests: XCTestCase {
         )
     }
 
-    private func buildMockOutlookDatabase(at url: URL, populate: (OpaquePointer) throws -> Void) throws {
+    private func buildMockOutlookDatabase(
+        at url: URL,
+        includeThreadTopic: Bool = true,
+        populate: (OpaquePointer) throws -> Void
+    ) throws {
         var db: OpaquePointer?
         let rc = sqlite3_open_v2(
             url.path,
@@ -660,6 +887,10 @@ final class HistoricalPriceLookupTests: XCTestCase {
             ])
         }
         defer { sqlite3_close(db) }
+
+        let threadTopicColumnSQL = includeThreadTopic
+            ? "\n            thread_topic TEXT NOT NULL DEFAULT '',"
+            : ""
 
         let schemaSQL = """
         CREATE TABLE messages (
@@ -675,7 +906,7 @@ final class HistoricalPriceLookupTests: XCTestCase {
             date_iso TEXT NOT NULL DEFAULT '',
             body_latest TEXT NOT NULL DEFAULT '',
             body_quoted TEXT NOT NULL DEFAULT '',
-            content_hash TEXT NOT NULL UNIQUE,
+            content_hash TEXT NOT NULL UNIQUE,\(threadTopicColumnSQL)
             project_name TEXT NOT NULL DEFAULT '',
             customers_orgs TEXT NOT NULL DEFAULT ''
         );
@@ -738,14 +969,24 @@ final class HistoricalPriceLookupTests: XCTestCase {
         db: OpaquePointer,
         messageID: String,
         subject: String,
+        threadTopic: String = "",
         dateISO: String,
         projectName: String,
-        customerOrg: String
+        customerOrg: String,
+        hasThreadTopicColumn: Bool = true
     ) throws -> Int64 {
-        let sql = """
-        INSERT INTO messages (source, source_ref, message_id, subject, sender, date_iso, body_latest, content_hash, project_name, customers_orgs)
-        VALUES ('apple_mail', ?, ?, ?, 'sales@moxa.com', ?, 'body', ?, ?, ?);
-        """
+        let sql: String
+        if hasThreadTopicColumn {
+            sql = """
+            INSERT INTO messages (source, source_ref, message_id, subject, sender, date_iso, body_latest, content_hash, project_name, customers_orgs, thread_topic)
+            VALUES ('apple_mail', ?, ?, ?, 'sales@moxa.com', ?, 'body', ?, ?, ?, ?);
+            """
+        } else {
+            sql = """
+            INSERT INTO messages (source, source_ref, message_id, subject, sender, date_iso, body_latest, content_hash, project_name, customers_orgs)
+            VALUES ('apple_mail', ?, ?, ?, 'sales@moxa.com', ?, 'body', ?, ?, ?);
+            """
+        }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
             throw NSError(domain: "HistoricalPriceLookupTests", code: -1)
@@ -761,6 +1002,9 @@ final class HistoricalPriceLookupTests: XCTestCase {
         hash.withCString { _ = sqlite3_bind_text(stmt, 5, $0, -1, transient) }
         projectName.withCString { _ = sqlite3_bind_text(stmt, 6, $0, -1, transient) }
         customerOrg.withCString { _ = sqlite3_bind_text(stmt, 7, $0, -1, transient) }
+        if hasThreadTopicColumn {
+            threadTopic.withCString { _ = sqlite3_bind_text(stmt, 8, $0, -1, transient) }
+        }
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw NSError(domain: "HistoricalPriceLookupTests", code: -2)

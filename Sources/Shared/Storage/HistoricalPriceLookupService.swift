@@ -149,6 +149,17 @@ public final class HistoricalPriceLookupService: Sendable {
         return patterns.compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
     }()
 
+    // Strips leading external tags and stacked Re:/Fw:/Fwd:/回复:/答复:/转发: prefixes (ASCII & CJK colons).
+    private static let subjectPrefixRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"^(?:\s*(?:(?:\[external\]|【外部邮件】|\[外部邮件\])\s*|(?:re|fw|fwd|回复|回覆|答复|答復|转发|轉發)(?:\[\d+\])?\s*[:：]\s*))+"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let substantialPriceContextRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: #"(?:\b\d{1,3}(?:,\d{3})+|\b\d{3,6})(?:\.\d{1,2})?\s*(?:/\s*(?:pc|pcs|台|套))?\s*(?:\(?\s*)?(?:CNY|RMB|未税|未稅|含税|含稅|元)"#,
+        options: [.caseInsensitive]
+    )
+
     private let stagingDirectoryURL: URL?
 
     public init(stagingDirectoryURL: URL? = nil) {
@@ -685,6 +696,32 @@ public final class HistoricalPriceLookupService: Sendable {
         return groups
     }
 
+    private struct RawPriceRow {
+        let sku: String
+        let rawCurrency: String
+        let currency: String
+        let unitPrice: Double
+        let quantity: Double?
+        let priceType: String
+        let taxMode: String
+        let customerOrg: String
+        let customerTokens: [String]
+        let canonicalCustomerSet: Set<String>
+        let projectName: String
+        let canonicalProject: String
+        let quoteDateISO: String
+        let subject: String
+        let normalizedSubject: String
+        let threadTopic: String
+        let normalizedThreadTopic: String
+        let displayTopic: String
+        let rfcMessageID: String
+        let normalizedRFCMessageID: String
+        let evidenceSnippet: String
+        let confidence: String
+        let priceKey: String
+    }
+
     private struct PriceDedupBucket {
         let priceKey: String
         let groupKey: String
@@ -694,14 +731,68 @@ public final class HistoricalPriceLookupService: Sendable {
         var quantity: Double?
         var priceType: String
         var taxMode: String
-        var customerOrg: String
+        var orderedCustomers: [String]
+        var seenCanonicalCustomers: Set<String>
         var projectName: String
+        var displayTopic: String
         var quoteDateISO: String
         var subject: String
         var rfcMessageID: String
         var evidenceSnippet: String
         var confidence: String
         var occurrenceCount: Int
+
+        init(from row: RawPriceRow, groupKey: String) {
+            self.priceKey = row.priceKey
+            self.groupKey = groupKey
+            self.sku = row.sku
+            self.currency = row.currency.isEmpty ? row.rawCurrency : row.currency
+            self.unitPrice = row.unitPrice
+            self.quantity = row.quantity
+            self.priceType = row.priceType
+            self.taxMode = row.taxMode
+            self.orderedCustomers = []
+            self.seenCanonicalCustomers = []
+            self.projectName = row.projectName
+            self.displayTopic = row.displayTopic
+            self.quoteDateISO = row.quoteDateISO
+            self.subject = row.subject
+            self.rfcMessageID = row.rfcMessageID
+            self.evidenceSnippet = row.evidenceSnippet
+            self.confidence = row.confidence.isEmpty ? "medium" : row.confidence
+            self.occurrenceCount = 1
+            appendCustomers(row.customerTokens)
+        }
+
+        mutating func merge(from row: RawPriceRow) {
+            occurrenceCount += 1
+            if row.quoteDateISO > quoteDateISO {
+                quoteDateISO = row.quoteDateISO
+                if !row.subject.isEmpty { subject = row.subject }
+                if !row.rfcMessageID.isEmpty { rfcMessageID = row.rfcMessageID }
+                if !row.evidenceSnippet.isEmpty { evidenceSnippet = row.evidenceSnippet }
+            }
+            if taxMode.isEmpty, !row.taxMode.isEmpty {
+                taxMode = row.taxMode
+            }
+            appendCustomers(row.customerTokens)
+            if projectName.isEmpty, !row.projectName.isEmpty {
+                projectName = row.projectName
+            }
+            if displayTopic.isEmpty, !row.displayTopic.isEmpty {
+                displayTopic = row.displayTopic
+            }
+            if quantity == nil, orderedCustomers.count <= 1, let incomingQty = row.quantity {
+                quantity = incomingQty
+            }
+            if priceTypeRank(row.priceType) < priceTypeRank(priceType) {
+                priceType = row.priceType
+            }
+            let normalizedConf = row.confidence.isEmpty ? "medium" : row.confidence
+            if confidenceRank(normalizedConf) < confidenceRank(confidence) {
+                confidence = normalizedConf
+            }
+        }
 
         mutating func merge(from incoming: PriceDedupBucket) {
             occurrenceCount += incoming.occurrenceCount
@@ -714,13 +805,18 @@ public final class HistoricalPriceLookupService: Sendable {
             if taxMode.isEmpty, !incoming.taxMode.isEmpty {
                 taxMode = incoming.taxMode
             }
-            if customerOrg.isEmpty, !incoming.customerOrg.isEmpty {
-                customerOrg = incoming.customerOrg
-            }
+            appendCustomers(incoming.orderedCustomers)
             if projectName.isEmpty, !incoming.projectName.isEmpty {
                 projectName = incoming.projectName
             }
-            if quantity == nil, let incomingQty = incoming.quantity {
+            if displayTopic.isEmpty, !incoming.displayTopic.isEmpty {
+                displayTopic = incoming.displayTopic
+            }
+            if quantity == nil,
+               orderedCustomers.count <= 1,
+               incoming.orderedCustomers.count <= 1,
+               let incomingQty = incoming.quantity
+            {
                 quantity = incomingQty
             }
             if priceTypeRank(incoming.priceType) < priceTypeRank(priceType) {
@@ -728,6 +824,16 @@ public final class HistoricalPriceLookupService: Sendable {
             }
             if confidenceRank(incoming.confidence) < confidenceRank(confidence) {
                 confidence = incoming.confidence
+            }
+        }
+
+        private mutating func appendCustomers(_ tokens: [String]) {
+            for token in tokens {
+                let canonical = HistoricalPriceLookupService.canonicalEntityText(token)
+                guard !canonical.isEmpty else { continue }
+                if seenCanonicalCustomers.insert(canonical).inserted {
+                    orderedCustomers.append(token)
+                }
             }
         }
 
@@ -752,16 +858,8 @@ public final class HistoricalPriceLookupService: Sendable {
         }
     }
 
-    private static func queryPriceRows(
-        db: OpaquePointer,
-        skuPattern: String,
-        excludedSKUPrefix: String?,
-        isExactSKUMatch: Bool,
-        normalizedSelfMessageID: String,
-        maxResults: Int,
-        seenRecordIDs: inout Set<String>
-    ) -> [HistoricalPriceRecord] {
-        let sql = """
+    private static func preparePriceQueryStatement(db: OpaquePointer) -> OpaquePointer? {
+        let primarySQL = """
         SELECT
             v.sku,
             v.currency,
@@ -775,7 +873,8 @@ public final class HistoricalPriceLookupService: Sendable {
             v.subject,
             m.message_id AS rfc_message_id,
             v.evidence_snippet,
-            v.confidence
+            v.confidence,
+            COALESCE(m.thread_topic, '') AS thread_topic
         FROM v_sku_price_history v
         JOIN messages m ON m.id = v.message_id
         WHERE v.unit_price IS NOT NULL
@@ -788,7 +887,53 @@ public final class HistoricalPriceLookupService: Sendable {
         """
 
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else {
+        if sqlite3_prepare_v2(db, primarySQL, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            return stmt
+        }
+
+        // Fallback for older or minimal mock schemas lacking `messages.thread_topic`.
+        let fallbackSQL = """
+        SELECT
+            v.sku,
+            v.currency,
+            v.unit_price,
+            v.quantity,
+            v.price_type,
+            v.tax_mode,
+            v.customer_org,
+            v.project_name,
+            v.quote_date_iso,
+            v.subject,
+            m.message_id AS rfc_message_id,
+            v.evidence_snippet,
+            v.confidence,
+            '' AS thread_topic
+        FROM v_sku_price_history v
+        JOIN messages m ON m.id = v.message_id
+        WHERE v.unit_price IS NOT NULL
+          AND v.unit_price > 0
+          AND (UPPER(v.sku) = UPPER(?1) OR UPPER(v.sku) LIKE UPPER(?2) || '%' ESCAPE '\\')
+        ORDER BY v.quote_date_iso DESC,
+                 CASE LOWER(v.confidence) WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                 v.message_id DESC
+        LIMIT \(sqlScanLimit)
+        """
+        if sqlite3_prepare_v2(db, fallbackSQL, -1, &stmt, nil) == SQLITE_OK, let stmt {
+            return stmt
+        }
+        return nil
+    }
+
+    private static func queryPriceRows(
+        db: OpaquePointer,
+        skuPattern: String,
+        excludedSKUPrefix: String?,
+        isExactSKUMatch: Bool,
+        normalizedSelfMessageID: String,
+        maxResults: Int,
+        seenRecordIDs: inout Set<String>
+    ) -> [HistoricalPriceRecord] {
+        guard let stmt = preparePriceQueryStatement(db: db) else {
             return []
         }
         defer { sqlite3_finalize(stmt) }
@@ -801,11 +946,8 @@ public final class HistoricalPriceLookupService: Sendable {
             _ = sqlite3_bind_text(stmt, 2, cStr, -1, sqliteTransient)
         }
 
-        // Pass 1: Collapse rows sharing (SKU, canonical currency, rounded unitPrice, customer/project entity)
-        // across recurring dates (e.g., weekly cumulative billing reports).
-        var bucketsByKey: [String: PriceDedupBucket] = [:]
-        var bucketOrder: [String] = []
-
+        var rowsByPriceKey: [String: [RawPriceRow]] = [:]
+        var priceKeyOrder: [String] = []
         let excludedUpperPrefix = excludedSKUPrefix?.uppercased()
 
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -831,74 +973,143 @@ public final class HistoricalPriceLookupService: Sendable {
             let rfcMessageID = ParsedEmailContext.normalizeMessageID(columnString(stmt, index: 10))
             let evidenceSnippet = columnString(stmt, index: 11).trimmingCharacters(in: .whitespacesAndNewlines)
             let confidence = columnString(stmt, index: 12).trimmingCharacters(in: .whitespacesAndNewlines)
+            let threadTopic = columnString(stmt, index: 13).trimmingCharacters(in: .whitespacesAndNewlines)
 
+            let normalizedRFCMessageID = rfcMessageID.lowercased()
             if !normalizedSelfMessageID.isEmpty,
                !normalizedSelfMessageID.hasPrefix("sha256:"),
-               rfcMessageID.lowercased() == normalizedSelfMessageID
+               normalizedRFCMessageID == normalizedSelfMessageID
             {
                 continue
             }
 
-            let roundedPrice = String(format: "%.2f", (unitPrice * 100).rounded() / 100)
-            let priceKey = "\(sku.uppercased())|\(currency)|\(roundedPrice)"
-            let entityKey: String
-            if !customerOrg.isEmpty {
-                entityKey = "cust:\(canonicalEntityText(customerOrg))"
-            } else if !projectName.isEmpty {
-                entityKey = "proj:\(canonicalEntityText(projectName))"
-            } else {
-                entityKey = "anon"
-            }
-            let groupKey = "\(priceKey)|\(entityKey)"
-
-            // Skip records already emitted in an earlier exact pass.
-            if seenRecordIDs.contains(groupKey) {
+            if isBogusTinyRMBArtifact(
+                unitPrice: unitPrice,
+                canonicalCurrency: currency,
+                evidenceSnippet: evidenceSnippet
+            ) {
                 continue
             }
 
-            let incoming = PriceDedupBucket(
-                priceKey: priceKey,
-                groupKey: groupKey,
+            let customerTokens = splitCustomerTokens(customerOrg)
+            let canonicalCustomerSet = Set(customerTokens.map(canonicalEntityText).filter { !$0.isEmpty })
+            let cleanedThread = cleanDisplayTopic(threadTopic)
+            let cleanedSubject = cleanDisplayTopic(subject)
+            let displayTopic = cleanedThread.isEmpty ? cleanedSubject : cleanedThread
+
+            let roundedPrice = String(format: "%.2f", (unitPrice * 100).rounded() / 100)
+            let priceKey = "\(sku.uppercased())|\(currency)|\(roundedPrice)"
+
+            let row = RawPriceRow(
                 sku: sku,
-                currency: currency.isEmpty ? rawCurrency : currency,
+                rawCurrency: rawCurrency,
+                currency: currency,
                 unitPrice: unitPrice,
                 quantity: quantity,
                 priceType: priceType,
                 taxMode: taxMode,
                 customerOrg: customerOrg,
+                customerTokens: customerTokens,
+                canonicalCustomerSet: canonicalCustomerSet,
                 projectName: projectName,
+                canonicalProject: canonicalEntityText(projectName),
                 quoteDateISO: quoteDateISO,
                 subject: subject,
+                normalizedSubject: cleanedSubject.lowercased(),
+                threadTopic: threadTopic,
+                normalizedThreadTopic: cleanedThread.lowercased(),
+                displayTopic: displayTopic,
                 rfcMessageID: rfcMessageID,
+                normalizedRFCMessageID: normalizedRFCMessageID,
                 evidenceSnippet: evidenceSnippet,
-                confidence: confidence.isEmpty ? "medium" : confidence,
-                occurrenceCount: 1
+                confidence: confidence,
+                priceKey: priceKey
             )
 
-            if var existing = bucketsByKey[groupKey] {
-                existing.merge(from: incoming)
-                bucketsByKey[groupKey] = existing
-            } else {
-                bucketsByKey[groupKey] = incoming
-                bucketOrder.append(groupKey)
+            if rowsByPriceKey[priceKey] == nil {
+                priceKeyOrder.append(priceKey)
+            }
+            rowsByPriceKey[priceKey, default: []].append(row)
+        }
+
+        // Stage 1: Merge rows within each priceKey across same thread, same normalized subject,
+        // overlapping customers, or matching project-only entities.
+        var stage1Buckets: [PriceDedupBucket] = []
+        for priceKey in priceKeyOrder {
+            guard let groupRows = rowsByPriceKey[priceKey], !groupRows.isEmpty else { continue }
+            let count = groupRows.count
+            var parent = Array(0..<count)
+
+            func find(_ x: Int) -> Int {
+                var node = x
+                while parent[node] != node {
+                    parent[node] = parent[parent[node]]
+                    node = parent[node]
+                }
+                return node
+            }
+
+            func union(_ a: Int, _ b: Int) {
+                let ra = find(a)
+                let rb = find(b)
+                if ra != rb {
+                    if ra < rb {
+                        parent[rb] = ra
+                    } else {
+                        parent[ra] = rb
+                    }
+                }
+            }
+
+            for i in 0..<count {
+                let lhs = groupRows[i]
+                for j in (i + 1)..<count {
+                    if shouldMergeSamePriceRows(lhs, groupRows[j]) {
+                        union(i, j)
+                    }
+                }
+            }
+
+            var componentsByRoot: [Int: [RawPriceRow]] = [:]
+            var componentOrder: [Int] = []
+            for idx in 0..<count {
+                let root = find(idx)
+                if componentsByRoot[root] == nil {
+                    componentOrder.append(root)
+                }
+                componentsByRoot[root, default: []].append(groupRows[idx])
+            }
+
+            for root in componentOrder {
+                guard let componentRows = componentsByRoot[root], let first = componentRows.first else { continue }
+                let seedKey = componentGroupKey(for: first)
+                if seenRecordIDs.contains(seedKey) {
+                    continue
+                }
+                var bucket = PriceDedupBucket(from: first, groupKey: seedKey)
+                for row in componentRows.dropFirst() {
+                    bucket.merge(from: row)
+                }
+                stage1Buckets.append(bucket)
             }
         }
 
-        // Pass 2: Collapse sparse rows (empty customerOrg) into a richer record at the same priceKey
+        // Stage 2: Collapse sparse rows (empty customerOrg) into a richer record at the same priceKey
         // when project names overlap or when the sparse row has no project metadata at all.
         var richBuckets: [PriceDedupBucket] = []
         var sparseBuckets: [PriceDedupBucket] = []
-        for key in bucketOrder {
-            guard let bucket = bucketsByKey[key] else { continue }
-            if !bucket.customerOrg.isEmpty {
+        for bucket in stage1Buckets {
+            if !bucket.orderedCustomers.isEmpty {
                 richBuckets.append(bucket)
             } else {
                 sparseBuckets.append(bucket)
             }
         }
 
+        let orderedSparse = sparseBuckets.filter { !$0.projectName.isEmpty }
+            + sparseBuckets.filter { $0.projectName.isEmpty }
         var remainingSparse: [PriceDedupBucket] = []
-        for sparse in sparseBuckets {
+        for sparse in orderedSparse {
             if let richIdx = richBuckets.firstIndex(where: { rich in
                 rich.priceKey == sparse.priceKey
                     && (sparse.projectName.isEmpty || projectsOverlap(rich.projectName, sparse.projectName))
@@ -930,15 +1141,25 @@ public final class HistoricalPriceLookupService: Sendable {
         }
 
         return limited.map { bucket in
-            HistoricalPriceRecord(
+            let formattedCustomer = formatCustomerSummary(bucket.orderedCustomers)
+            let resolvedProject: String
+            if !bucket.projectName.isEmpty {
+                resolvedProject = bucket.projectName
+            } else if bucket.orderedCustomers.count != 1 {
+                resolvedProject = bucket.displayTopic
+            } else {
+                resolvedProject = ""
+            }
+
+            return HistoricalPriceRecord(
                 sku: bucket.sku,
                 currency: bucket.currency,
                 unitPrice: bucket.unitPrice,
                 quantity: bucket.quantity,
                 priceType: bucket.priceType,
                 taxMode: bucket.taxMode,
-                customerOrg: bucket.customerOrg,
-                projectName: bucket.projectName,
+                customerOrg: formattedCustomer,
+                projectName: resolvedProject,
                 quoteDateISO: bucket.quoteDateISO,
                 subject: bucket.subject,
                 rfcMessageID: bucket.rfcMessageID,
@@ -952,6 +1173,125 @@ public final class HistoricalPriceLookupService: Sendable {
     }
 
     // MARK: - Private Utilities
+
+    private static func shouldMergeSamePriceRows(_ lhs: RawPriceRow, _ rhs: RawPriceRow) -> Bool {
+        if !lhs.normalizedRFCMessageID.isEmpty, lhs.normalizedRFCMessageID == rhs.normalizedRFCMessageID {
+            return true
+        }
+        if !lhs.normalizedThreadTopic.isEmpty, lhs.normalizedThreadTopic == rhs.normalizedThreadTopic {
+            return true
+        }
+        if !lhs.normalizedSubject.isEmpty, lhs.normalizedSubject == rhs.normalizedSubject {
+            return true
+        }
+        if (!lhs.normalizedThreadTopic.isEmpty && lhs.normalizedThreadTopic == rhs.normalizedSubject)
+            || (!rhs.normalizedThreadTopic.isEmpty && rhs.normalizedThreadTopic == lhs.normalizedSubject)
+        {
+            return true
+        }
+        if !lhs.canonicalCustomerSet.isEmpty,
+           !rhs.canonicalCustomerSet.isEmpty,
+           !lhs.canonicalCustomerSet.isDisjoint(with: rhs.canonicalCustomerSet)
+        {
+            return true
+        }
+        if lhs.canonicalCustomerSet.isEmpty,
+           rhs.canonicalCustomerSet.isEmpty,
+           !lhs.canonicalProject.isEmpty,
+           lhs.canonicalProject == rhs.canonicalProject
+        {
+            return true
+        }
+        return false
+    }
+
+    private static func componentGroupKey(for row: RawPriceRow) -> String {
+        if let firstCust = row.customerTokens.first {
+            return "\(row.priceKey)|cust:\(canonicalEntityText(firstCust))"
+        }
+        if !row.canonicalProject.isEmpty {
+            return "\(row.priceKey)|proj:\(row.canonicalProject)"
+        }
+        if !row.normalizedThreadTopic.isEmpty {
+            return "\(row.priceKey)|topic:\(row.normalizedThreadTopic)"
+        }
+        if !row.normalizedSubject.isEmpty {
+            return "\(row.priceKey)|subj:\(row.normalizedSubject)"
+        }
+        return "\(row.priceKey)|mid:\(row.normalizedRFCMessageID)"
+    }
+
+    private static func cleanDisplayTopic(_ raw: String) -> String {
+        var working = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !working.isEmpty else { return "" }
+        if let regex = subjectPrefixRegex {
+            let ns = working as NSString
+            working = regex.stringByReplacingMatches(
+                in: working,
+                options: [],
+                range: NSRange(location: 0, length: ns.length),
+                withTemplate: ""
+            )
+        }
+        return working
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func normalizeThreadOrSubject(_ raw: String) -> String {
+        cleanDisplayTopic(raw).lowercased()
+    }
+
+    private static func splitCustomerTokens(_ raw: String) -> [String] {
+        raw.components(separatedBy: CharacterSet(charactersIn: ",，、;；"))
+            .map {
+                $0.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func formatCustomerSummary(_ orderedUniqueCustomers: [String]) -> String {
+        switch orderedUniqueCustomers.count {
+        case 0:
+            return ""
+        case 1:
+            return orderedUniqueCustomers[0]
+        case 2:
+            return "\(orderedUniqueCustomers[0])、\(orderedUniqueCustomers[1])"
+        default:
+            return "\(orderedUniqueCustomers[0])、\(orderedUniqueCustomers[1]) 等 \(orderedUniqueCustomers.count) 家"
+        }
+    }
+
+    private static func isBogusTinyRMBArtifact(
+        unitPrice: Double,
+        canonicalCurrency: String,
+        evidenceSnippet: String
+    ) -> Bool {
+        guard canonicalCurrency == "RMB",
+              unitPrice > 0,
+              unitPrice < 20,
+              abs(unitPrice - unitPrice.rounded()) < 0.000_001,
+              !evidenceSnippet.isEmpty,
+              let priceContextRegex = substantialPriceContextRegex
+        else {
+            return false
+        }
+
+        let ns = evidenceSnippet as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        guard priceContextRegex.firstMatch(in: evidenceSnippet, options: [], range: fullRange) != nil else {
+            return false
+        }
+
+        let n = Int(unitPrice.rounded())
+        let tokenPattern = #"(?<![A-Za-z0-9./-])0*"# + String(n) + #"(?![A-Za-z0-9./-]|\s*(?:pcs|pc|台|套|个|支|根|条)(?![A-Za-z]))"#
+        guard let tokenRegex = try? NSRegularExpression(pattern: tokenPattern, options: [.caseInsensitive]) else {
+            return false
+        }
+        return tokenRegex.firstMatch(in: evidenceSnippet, options: [], range: fullRange) == nil
+    }
 
     private static func canonicalCurrency(_ raw: String) -> String {
         let upper = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
