@@ -127,7 +127,7 @@ final class ComposeReplyViewModel: ObservableObject {
     func copyDraftText(_ text: String, label: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-        let toast = "已复制\(label)（在写信框按 ⌘V 粘贴）"
+        let toast = "已复制\(label)（在写信框按 ⌘V）"
         copiedToast = toast
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(2.2))
@@ -173,246 +173,287 @@ public struct ComposeReplyPanelView: View {
             } else {
                 VStack(spacing: 0) {
                     topBar
-                    Divider()
+                    Divider().opacity(0.6)
 
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 10) {
                             originalContextSection
                             intentComposerSection
 
                             if let error = vm.errorMessage {
-                                Text("⚠️ \(error)")
-                                    .font(.caption)
-                                    .foregroundStyle(.red)
-                                    .padding(8)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(Color.red.opacity(0.08))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.system(size: 11.5))
+                                    Text(error)
+                                        .font(.system(size: 11.5))
+                                }
+                                .foregroundStyle(.red)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.red.opacity(0.08))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                             }
 
                             if let draft = vm.draft {
                                 draftOutputSection(draft)
                             }
                         }
-                        .padding(14)
+                        .padding(12)
                     }
                 }
             }
         }
         .frame(minWidth: 480, minHeight: 520)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(MailVibrancyBackground())
         .task {
             vm.refreshKeyStatus()
         }
     }
 
     private var topBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("AI 双语回复助手", systemImage: "square.and.pencil")
-                    .font(.headline)
-                Spacer()
-                if let toast = vm.copiedToast {
-                    Text(toast)
-                        .font(.caption2.weight(.medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.green.opacity(0.15))
-                        .foregroundStyle(.green)
-                        .clipShape(Capsule())
-                }
-                Button {
-                    showKeychainSheet = true
-                } label: {
-                    Label("Key", systemImage: "key.fill")
-                }
-                .controlSize(.small)
+        HStack(spacing: 8) {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("AI 双语回复")
+                .font(.system(size: 13.5, weight: .semibold))
+
+            if let toast = vm.copiedToast {
+                Text(toast)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.green)
+                    .lineLimit(1)
             }
 
-            HStack(spacing: 8) {
-                Picker("模型", selection: Binding(
-                    get: { vm.selectedModel },
-                    set: { vm.selectModel($0) }
-                )) {
-                    ForEach(GeminiModel.allCases) { model in
-                        Text(model.shortLabel).tag(model)
+            Spacer(minLength: 6)
+
+            MailModelMenuButton(selection: Binding(
+                get: { vm.selectedModel },
+                set: { vm.selectModel($0) }
+            ))
+
+            Menu {
+                ForEach(ComposeReplyTone.allCases) { tone in
+                    Button {
+                        vm.tone = tone
+                    } label: {
+                        HStack {
+                            Text(tone.rawValue)
+                            if vm.tone == tone {
+                                Image(systemName: "checkmark")
+                            }
+                        }
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 220)
-
-                Picker("语气", selection: $vm.tone) {
-                    ForEach(ComposeReplyTone.allCases) { tone in
-                        Text(tone.rawValue).tag(tone)
-                    }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(vm.tone.rawValue)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.primary.opacity(0.85))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .labelsHidden()
-                .frame(maxWidth: 120)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.06))
+                .overlay(
+                    Capsule()
+                        .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 0.5)
+                )
+                .clipShape(Capsule())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("选择回复语气")
 
-                Spacer()
+            MailIconActionButton(systemImage: "gearshape", helpText: "凭据与自动化设置") {
+                showKeychainSheet = true
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
     }
 
     @ViewBuilder
     private var originalContextSection: some View {
         if let original = vm.originalEmail {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Image(systemName: "envelope.open.fill")
-                        .foregroundStyle(.blue)
-                    Text("已自动读取原信上下文")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
+            MailSectionContainer(
+                title: "原信上下文",
+                systemImage: "envelope.open",
+                trailing: {
                     if !original.attachments.isEmpty {
-                        Text("附件 \(original.attachments.count) 个")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Text("附件 \(original.attachments.count)")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                Text("主题：\(original.subject.isEmpty ? "(无主题)" : original.subject)")
-                    .font(.caption)
-                    .lineLimit(1)
-                if !original.from.isEmpty {
-                    Text("原发件人：\(original.from)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+            ) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(original.subject.isEmpty ? "（无主题）" : original.subject)
+                        .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)
-                }
-                if !original.plainBody.isEmpty {
-                    Text(original.plainBody)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
+                    if !original.from.isEmpty {
+                        Text(original.from)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    if !original.plainBody.isEmpty {
+                        Text(original.plainBody)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.blue.opacity(0.07))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
         } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("未检测到引用原信（新建邮件或纯文本草稿），可选粘贴对方来信摘要：")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            MailSectionContainer(title: "原信摘要（可选）", systemImage: "doc.text") {
                 TextEditor(text: $vm.manualOriginalContext)
-                    .font(.caption)
-                    .frame(height: 60)
+                    .font(.system(size: 12))
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .frame(height: 56)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.7))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 0.5)
                     )
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
         }
     }
 
     private var intentComposerSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("输入你想表达的回复要点（支持中英文混输）：")
-                .font(.subheadline.weight(.medium))
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(quickIntents, id: \.self) { snippet in
-                        Button(snippet) {
-                            vm.applyQuickIntent(snippet)
+        MailSectionContainer(title: "回复要点", systemImage: "text.bubble") {
+            VStack(alignment: .leading, spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(quickIntents, id: \.self) { snippet in
+                            Button(snippet) {
+                                vm.applyQuickIntent(snippet)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.055))
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+                            )
+                            .clipShape(Capsule())
                         }
-                        .controlSize(.small)
-                        .buttonStyle(.bordered)
                     }
                 }
-            }
 
-            TextEditor(text: $vm.userIntent)
-                .font(.callout)
-                .frame(height: 82)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.primary.opacity(0.15), lineWidth: 1)
-                )
+                TextEditor(text: $vm.userIntent)
+                    .font(.system(size: 12.5))
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .frame(height: 82)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.75))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
 
-            HStack {
-                Text("MailKit 安全限制不允许扩展直接篡改编辑器正文，生成后可一键复制粘贴。")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    Task { await vm.generate() }
-                } label: {
-                    HStack(spacing: 5) {
-                        if vm.isGenerating {
-                            ProgressView().controlSize(.small)
+                HStack {
+                    Text("生成后点击复制即可 ⌘V 粘贴到正文")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button {
+                        Task { await vm.generate() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            if vm.isGenerating {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text(vm.isGenerating ? "生成中…" : "生成双语草稿")
                         }
-                        Text(vm.isGenerating ? "生成中…" : "生成双语回复草稿")
                     }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(vm.isGenerating)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(vm.isGenerating)
             }
         }
     }
 
     private func draftOutputSection(_ draft: ComposeReplyDraft) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Divider()
+        let activeText: String = switch vm.selectedTab {
+        case .bilingual: draft.bilingualCombinedDraft
+        case .english: draft.englishDraft
+        case .chinese: draft.chineseDraft
+        }
 
-            HStack {
-                Text("建议主题：\(draft.suggestedSubject)")
-                    .font(.caption.weight(.semibold))
-                    .textSelection(.enabled)
-                Spacer()
-                Button("复制主题") {
-                    vm.copyDraftText(draft.suggestedSubject, label: "主题")
-                }
-                .controlSize(.small)
-            }
-
-            Picker("显示格式", selection: $vm.selectedTab) {
-                ForEach(ComposeDraftTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-
-            let activeText: String = switch vm.selectedTab {
-            case .bilingual: draft.bilingualCombinedDraft
-            case .english: draft.englishDraft
-            case .chinese: draft.chineseDraft
-            }
-
-            Text(activeText)
-                .font(.callout)
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(nsColor: .textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                )
-
-            HStack {
-                Button("复制当前版本") {
-                    vm.copyDraftText(activeText, label: vm.selectedTab.rawValue)
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button("仅复制英文") {
-                    vm.copyDraftText(draft.englishDraft, label: "英文正文")
-                }
-
-                Button("仅复制中文") {
-                    vm.copyDraftText(draft.chineseDraft, label: "中文正文")
-                }
-                Spacer()
+        return MailSectionContainer(
+            title: "生成草稿",
+            systemImage: "sparkles",
+            trailing: {
                 Text(draft.modelUsed)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+            }
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("主题：\(draft.suggestedSubject)")
+                        .font(.system(size: 12, weight: .medium))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                    Spacer()
+                    Button("复制主题") {
+                        vm.copyDraftText(draft.suggestedSubject, label: "主题")
+                    }
+                    .controlSize(.mini)
+                }
+
+                Picker("显示格式", selection: $vm.selectedTab) {
+                    ForEach(ComposeDraftTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+
+                Text(activeText)
+                    .font(.system(size: 12.5))
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.75))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                HStack(spacing: 8) {
+                    Button("复制当前版本") {
+                        vm.copyDraftText(activeText, label: vm.selectedTab.rawValue)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
+                    Button("仅英文") {
+                        vm.copyDraftText(draft.englishDraft, label: "英文正文")
+                    }
+                    .controlSize(.small)
+
+                    Button("仅中文") {
+                        vm.copyDraftText(draft.chineseDraft, label: "中文正文")
+                    }
+                    .controlSize(.small)
+
+                    Spacer()
+                }
             }
         }
     }

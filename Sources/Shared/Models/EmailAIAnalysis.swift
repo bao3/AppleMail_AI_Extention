@@ -1,17 +1,77 @@
 import Foundation
+#if canImport(MailKit)
+import MailKit
+#endif
+
+public enum MailFlagCategory: String, Codable, CaseIterable, Sendable, Identifiable {
+    case red
+    case orange
+    case yellow
+    case green
+    case blue
+    case purple
+    case gray
+    case none
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .red: return "紧急待回"
+        case .orange: return "等审批"
+        case .yellow: return "跟报价"
+        case .green: return "重点项目"
+        case .blue: return "技术卡点"
+        case .purple: return "产品变更"
+        case .gray: return "发票报销"
+        case .none: return "无旗标"
+        }
+    }
+}
+
+#if canImport(MailKit)
+public extension MailFlagCategory {
+    var mailKitFlag: MEMessageAction.Flag? {
+        switch self {
+        case .red: return .red
+        case .orange: return .orange
+        case .yellow: return .yellow
+        case .green: return .green
+        case .blue: return .blue
+        case .purple: return .purple
+        case .gray: return .gray
+        case .none: return nil
+        }
+    }
+}
+#endif
 
 public struct EmailTodoItem: Codable, Sendable, Hashable, Identifiable {
-    public var id: String { "\(priority)|\(owner)|\(task)|\(deadline ?? "")" }
+    public var id: String { "\(priority)|\(owner)|\(task)|\(deadline ?? "")|\(dueDateISO ?? "")" }
     public let task: String
     public let owner: String
     public let deadline: String?
+    public let dueDateISO: String?
     public let priority: String
 
-    public init(task: String, owner: String, deadline: String? = nil, priority: String = "medium") {
+    public init(
+        task: String,
+        owner: String,
+        deadline: String? = nil,
+        dueDateISO: String? = nil,
+        priority: String = "medium"
+    ) {
         self.task = task
         self.owner = owner
         self.deadline = deadline
+        self.dueDateISO = dueDateISO
         self.priority = priority
+    }
+
+    public func reminderStorageKey(messageID: String) -> String {
+        let normalizedID = ParsedEmailContext.normalizeMessageID(messageID).lowercased()
+        let normalizedTask = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(normalizedID)|\(normalizedTask)"
     }
 
     public var normalizedPriority: String {
@@ -103,6 +163,8 @@ public struct EmailAIAnalysis: Codable, Sendable, Hashable {
     public let businessElements: BusinessElements
     public let plainChineseTranslation: String
     public let timeline: [TimelineEvent]
+    public let suggestedFlag: String?
+    public let flagReason: String?
 
     public var messageID: String
     public var modelUsed: String
@@ -119,6 +181,8 @@ public struct EmailAIAnalysis: Codable, Sendable, Hashable {
         businessElements: BusinessElements,
         plainChineseTranslation: String,
         timeline: [TimelineEvent],
+        suggestedFlag: String? = nil,
+        flagReason: String? = nil,
         messageID: String = "",
         modelUsed: String = GeminiModel.defaultModel.rawValue,
         analyzedAt: Date = Date(),
@@ -133,6 +197,8 @@ public struct EmailAIAnalysis: Codable, Sendable, Hashable {
         self.businessElements = businessElements
         self.plainChineseTranslation = plainChineseTranslation
         self.timeline = timeline
+        self.suggestedFlag = suggestedFlag
+        self.flagReason = flagReason
         self.messageID = messageID
         self.modelUsed = modelUsed
         self.analyzedAt = analyzedAt
@@ -142,12 +208,25 @@ public struct EmailAIAnalysis: Codable, Sendable, Hashable {
         self.latencyMs = latencyMs
     }
 
+    public var resolvedFlag: MailFlagCategory {
+        guard let raw = suggestedFlag?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              let category = MailFlagCategory(rawValue: raw)
+        else {
+            return .none
+        }
+        return category
+    }
+
     public func toMarkdownReport(subject: String) -> String {
         var md: [String] = []
         md.append("# \(subject.isEmpty ? "邮件 AI 汇总分析" : subject)")
         md.append("")
         md.append("## 核心结论")
         md.append("**\(headline)**")
+        if resolvedFlag != .none {
+            let reasonSuffix = flagReason.flatMap { $0.isEmpty ? nil : "（\($0)）" } ?? ""
+            md.append("- **建议旗标**: \(resolvedFlag.label)\(reasonSuffix)")
+        }
         for item in coreConclusions {
             md.append("- \(item)")
         }

@@ -97,7 +97,7 @@ final class VertexGeminiClientTests: XCTestCase {
               "headline": "客户确认批量采购 120 台 EDS-4012",
               "coreConclusions": ["单价 USD 485 FOB Taipei", "要求周五前开立 PI"],
               "todos": [
-                {"task": "开立 PI", "owner": "我方商务", "deadline": "本周五", "priority": "high"}
+                {"task": "开立 PI", "owner": "我方商务", "deadline": "本周五", "dueDateISO": "2026-11-20", "priority": "high"}
               ],
               "businessElements": {
                 "projects": ["Helios-III"],
@@ -111,7 +111,9 @@ final class VertexGeminiClientTests: XCTestCase {
               "timeline": [
                 {"timeOrStep": "11-18", "actor": "Sales", "summary": "提交初步报价 USD 498"},
                 {"timeOrStep": "11-19", "actor": "Marcus", "summary": "确认 120 台目标价 USD 485"}
-              ]
+              ],
+              "suggestedFlag": "yellow",
+              "flagReason": "涉及批量报价与 PI 确认"
             }
             ```
             """
@@ -172,6 +174,10 @@ final class VertexGeminiClientTests: XCTestCase {
         XCTAssertEqual(result.outputTokens, 140)
         XCTAssertEqual(result.cachedTokens, 64)
         XCTAssertEqual(result.timeline.count, 2)
+        XCTAssertEqual(result.todos.first?.dueDateISO, "2026-11-20")
+        XCTAssertEqual(result.suggestedFlag, "yellow")
+        XCTAssertEqual(result.flagReason, "涉及批量报价与 PI 确认")
+        XCTAssertEqual(result.resolvedFlag, .yellow)
 
         let flashResult = try await client.analyzeEmail(
             email,

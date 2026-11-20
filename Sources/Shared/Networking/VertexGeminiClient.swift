@@ -107,7 +107,7 @@ public final class VertexGeminiClient: Sendable {
         输出要求（必须严格遵循 JSON Schema）：
         1. headline：用一句话概括这封邮件最核心的结论或诉求。
         2. coreConclusions：3~6 条高凝练核心要点（直奔主题，突出决策、变更、风险、交期或报价变化）。
-        3. todos：提取明确或隐含的待办事项（task、owner 负责方、deadline 截止时间若无填 ""、priority 仅可为 "high" / "medium" / "low"）。
+        3. todos：提取明确或隐含的待办事项（task、owner 负责方、deadline 截止时间原文描述若无填 ""、dueDateISO 若邮件明确提到或可依据邮件 Date 推算出具体任务日期则填 "YYYY-MM-DD"，例如 "本周五/11月25日前"，若邮件未提及任务时间必须填 ""、priority 仅可为 "high" / "medium" / "low"）。
         4. businessElements：
            - projects：提及的项目名称、项目编号或客户内部代号；
            - customers：客户公司、终端用户、相关团队或联系人；
@@ -115,6 +115,15 @@ public final class VertexGeminiClient: Sendable {
            - pricing：所有报价明细（itemOrModel、quantity、unitPrice、currency、termsOrLeadTime 贸易条款/交期、notes）。若某子项未提及填 ""。
         5. plainChineseTranslation：若最新正文包含英文或外文内容，准确翻译为通俗、自然、符合中国工程师与商务习惯的简体中文；若原信已是简体中文，仅输出 2~3 句精炼白话摘要（不要逐字复述中文原文），不丢失关键数字与技术名词。
         6. timeline：如果是长信或多轮往来邮件，按时间由早到晚梳理最多 5 个关键来往节点（timeOrStep、actor、summary）；如果是单封短邮件，仅输出 1 个关键节点。
+        7. suggestedFlag 与 flagReason：从下列 8 个值中选出最匹配邮件核心属性的唯一旗标 `suggestedFlag`（并用不超过 18 个汉字在 `flagReason` 说明原因）：
+           - "red"（紧急待回：需要尽快回复、有紧迫截止时间或高优阻塞项）
+           - "orange"（等审批：特价申请、MOQ 调整、用印/合同/流程签核）
+           - "yellow"（跟报价：询价、报价单、BOM 核价、PI、折扣或交期谈判）
+           - "green"（重点项目：核心轨交/工业项目推进、招投标、重要里程碑）
+           - "blue"（技术卡点：软硬件故障、规格确认、安规认证/测试报告卡点）
+           - "purple"（产品变更：PCN / EOL、Label 变更、新产品大类或物料变更）
+           - "gray"（发票报销：发票、差旅报销、付款结算提醒）
+           - "none"（一般知悉类邮件，无需打标）
         """
 
         let bodyObject: [String: Any] = [
@@ -157,6 +166,8 @@ public final class VertexGeminiClient: Sendable {
             let businessElements: BusinessElements
             let plainChineseTranslation: String
             let timeline: [TimelineEvent]
+            let suggestedFlag: String?
+            let flagReason: String?
         }
 
         do {
@@ -168,6 +179,8 @@ public final class VertexGeminiClient: Sendable {
                 businessElements: decoded.businessElements,
                 plainChineseTranslation: decoded.plainChineseTranslation,
                 timeline: decoded.timeline,
+                suggestedFlag: decoded.suggestedFlag,
+                flagReason: decoded.flagReason,
                 messageID: email.messageID,
                 modelUsed: model.rawValue,
                 analyzedAt: Date(),
@@ -415,9 +428,10 @@ public final class VertexGeminiClient: Sendable {
                             "task": ["type": "STRING"],
                             "owner": ["type": "STRING"],
                             "deadline": ["type": "STRING"],
+                            "dueDateISO": ["type": "STRING"],
                             "priority": ["type": "STRING"]
                         ],
-                        "required": ["task", "owner", "deadline", "priority"]
+                        "required": ["task", "owner", "deadline", "dueDateISO", "priority"]
                     ]
                 ],
                 "businessElements": [
@@ -456,7 +470,9 @@ public final class VertexGeminiClient: Sendable {
                         ],
                         "required": ["timeOrStep", "actor", "summary"]
                     ]
-                ]
+                ],
+                "suggestedFlag": ["type": "STRING"],
+                "flagReason": ["type": "STRING"]
             ],
             "required": [
                 "headline",
@@ -464,7 +480,9 @@ public final class VertexGeminiClient: Sendable {
                 "todos",
                 "businessElements",
                 "plainChineseTranslation",
-                "timeline"
+                "timeline",
+                "suggestedFlag",
+                "flagReason"
             ]
         ]
     }

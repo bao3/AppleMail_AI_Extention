@@ -129,17 +129,26 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
         )
 
         Task.detached(priority: .utility) {
+            var decision: MEMessageActionDecision?
             do {
-                _ = try await BackgroundAnalysisCoordinator.shared.analyzeIfNeeded(
+                let analysis = try await BackgroundAnalysisCoordinator.shared.analyzeIfNeeded(
                     email: parsed,
                     model: .flash38
                 )
+                if ExtensionOpsConfig.isAutoFlagMoxaPrimaryEnabled,
+                   let mailFlag = analysis.resolvedFlag.mailKitFlag
+                {
+                    decision = MEMessageActionDecision.action(.flag(mailFlag))
+                    ExtensionLogger.action.info(
+                        "Auto-flagging Moxa Primary message with '\(analysis.resolvedFlag.rawValue, privacy: .public)' (\(analysis.resolvedFlag.label, privacy: .public))"
+                    )
+                }
             } catch {
                 ExtensionLogger.action.warning(
                     "Background pre-analysis failed: \(error.localizedDescription, privacy: .public)"
                 )
             }
-            once.finish(nil)
+            once.finish(decision)
         }
 
         let timeoutSeconds = Self.decideActionSoftTimeoutSeconds

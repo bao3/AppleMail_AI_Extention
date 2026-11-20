@@ -8,7 +8,7 @@ final class MessageAnalysisViewController: MEExtensionViewController {
     init(emailContext: ParsedEmailContext) {
         self.emailContext = emailContext
         super.init(nibName: nil, bundle: nil)
-        self.preferredContentSize = NSSize(width: 560, height: 640)
+        self.preferredContentSize = NSSize(width: 540, height: 620)
     }
 
     @available(*, unavailable)

@@ -28,5 +28,11 @@
     <string>Copyright © 2026 AppleMailAI Contributors. All rights reserved.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>用于将邮件 AI 分析提取的待办事项一键添加到系统「提醒事项」，并设置截止日期与提前提醒。</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>用于将邮件 AI 分析提取的待办事项一键添加到系统「提醒事项」。</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>用于通过 EventKit 将邮件待办事项写入系统提醒事项。</string>
 </dict>
 </plist>

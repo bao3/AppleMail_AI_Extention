@@ -15,6 +15,7 @@ public enum ExtensionLogger {
     public static let keychain = Logger(subsystem: subsystem, category: "keychain")
     public static let cache = Logger(subsystem: subsystem, category: "cache")
     public static let network = Logger(subsystem: subsystem, category: "network")
+    public static let reminders = Logger(subsystem: subsystem, category: "reminders")
 }
 
 /// Ops kill-switch flags readable via `UserDefaults.standard` (e.g., `defaults write com.bao3.AppleMailAI.Extension ...`).
@@ -23,6 +24,8 @@ public enum ExtensionOpsConfig {
     public static let disableSecurityBannerKey = "com.bao3.AppleMailAI.disableSecurityBanner"
     /// Toggle for Moxa Primary background pre-analysis via `MEMessageActionHandler` (defaults to `true`).
     public static let autoAnalyzeMoxaPrimaryKey = "com.bao3.AppleMailAI.autoAnalyzeMoxaPrimary"
+    /// Toggle for automatic 7-color Mail flag assignment after Moxa Primary background analysis (defaults to `true`).
+    public static let autoFlagMoxaPrimaryKey = "com.bao3.AppleMailAI.autoFlagMoxaPrimary"
 
     public static var isSecurityBannerDisabled: Bool {
         UserDefaults.standard.bool(forKey: disableSecurityBannerKey)
@@ -37,5 +40,16 @@ public enum ExtensionOpsConfig {
 
     public static func setAutoAnalyzeMoxaPrimaryEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: autoAnalyzeMoxaPrimaryKey)
+    }
+
+    public static var isAutoFlagMoxaPrimaryEnabled: Bool {
+        if UserDefaults.standard.object(forKey: autoFlagMoxaPrimaryKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: autoFlagMoxaPrimaryKey)
+    }
+
+    public static func setAutoFlagMoxaPrimaryEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: autoFlagMoxaPrimaryKey)
     }
 }
