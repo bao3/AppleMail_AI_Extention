@@ -275,6 +275,7 @@ public struct EmailAnalysisPanelView: View {
     @State private var showAttachmentFilingSheet = false
     @State private var filingFocusFilename: String?
     @State private var showRawLocalExtraction = false
+    @State private var expandedPriceSKUs: Set<String> = []
 
     public init(email: ParsedEmailContext) {
         _vm = StateObject(wrappedValue: EmailAnalysisViewModel(email: email))
@@ -882,13 +883,32 @@ public struct EmailAnalysisPanelView: View {
                             }
                         }
 
+                        let isExpanded = expandedPriceSKUs.contains(group.id)
+                        let visibleRecords = isExpanded ? group.records : Array(group.records.prefix(5))
+
                         VStack(alignment: .leading, spacing: 0) {
-                            ForEach(Array(group.records.enumerated()), id: \.element.id) { rIdx, record in
+                            ForEach(Array(visibleRecords.enumerated()), id: \.element.id) { rIdx, record in
                                 historicalPriceRow(record)
-                                if rIdx < group.records.count - 1 {
+                                if rIdx < visibleRecords.count - 1 {
                                     Divider().opacity(0.4)
                                 }
                             }
+                        }
+
+                        if group.records.count > 5 {
+                            Button {
+                                if isExpanded {
+                                    expandedPriceSKUs.remove(group.id)
+                                } else {
+                                    expandedPriceSKUs.insert(group.id)
+                                }
+                            } label: {
+                                Text(isExpanded ? "收起" : "展开其余 \(group.records.count - 5) 条")
+                                    .font(.system(size: 10.5, weight: .medium))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.top, 2)
                         }
                     }
 
@@ -941,7 +961,8 @@ public struct EmailAnalysisPanelView: View {
                     record.customerOrg,
                     record.projectName,
                     record.quoteDateISO,
-                    record.quantity.map { "数量 \(Self.formatUnitPrice($0))" }
+                    record.quantity.map { "数量 \(Self.formatUnitPrice($0))" },
+                    record.occurrenceCount > 1 ? "合并 \(record.occurrenceCount) 封同价记录" : nil
                 ]
                 .compactMap { $0 }
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

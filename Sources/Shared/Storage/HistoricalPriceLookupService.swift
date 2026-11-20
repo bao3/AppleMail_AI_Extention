@@ -22,6 +22,7 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
     public let evidenceSnippet: String
     public let confidence: String
     public let isExactSKUMatch: Bool
+    public let occurrenceCount: Int
     public let mailJumpURL: URL?
 
     public init(
@@ -41,6 +42,7 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
         evidenceSnippet: String = "",
         confidence: String = "medium",
         isExactSKUMatch: Bool = true,
+        occurrenceCount: Int = 1,
         mailJumpURL: URL? = nil
     ) {
         self.sku = sku
@@ -58,6 +60,7 @@ public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
         self.evidenceSnippet = evidenceSnippet
         self.confidence = confidence
         self.isExactSKUMatch = isExactSKUMatch
+        self.occurrenceCount = max(1, occurrenceCount)
         self.mailJumpURL = mailJumpURL
         self.id = id ?? [
             sku.uppercased(),
@@ -109,9 +112,10 @@ public final class HistoricalPriceLookupService: Sendable {
     public static let shared = HistoricalPriceLookupService()
 
     private static let maxCandidateSKUs = 8
-    private static let maxExactMatchesPerSKU = 12
+    private static let maxExactMatchesPerSKU = 8
     private static let maxSeriesSupplementPerSKU = 5
     private static let exactThresholdForSeriesFallback = 3
+    private static let sqlScanLimit = 400
     private static let sqliteMagicHeader = Array("SQLite format 3\0".utf8)
 
     private static let chinesePricingKeywords: [String] = [
@@ -361,6 +365,7 @@ public final class HistoricalPriceLookupService: Sendable {
                         evidenceSnippet: record.evidenceSnippet,
                         confidence: record.confidence,
                         isExactSKUMatch: record.isExactSKUMatch,
+                        occurrenceCount: record.occurrenceCount,
                         mailJumpURL: ReminderService.mailMessageURL(forMessageID: record.rfcMessageID)
                     )
                 }
@@ -627,14 +632,15 @@ public final class HistoricalPriceLookupService: Sendable {
         var groups: [SKUPriceComparisonGroup] = []
 
         for queriedSKU in candidateSKUs {
-            var seenDedupKeys: Set<String> = []
+            var seenRecordIDs: Set<String> = []
             let exactRows = queryPriceRows(
                 db: db,
                 skuPattern: queriedSKU,
+                excludedSKUPrefix: nil,
                 isExactSKUMatch: true,
                 normalizedSelfMessageID: normalizedSelfMessageID,
                 maxResults: maxExactMatchesPerSKU,
-                seenDedupKeys: &seenDedupKeys
+                seenRecordIDs: &seenRecordIDs
             )
 
             var combinedRows = exactRows
@@ -644,10 +650,11 @@ public final class HistoricalPriceLookupService: Sendable {
                 let seriesRows = queryPriceRows(
                     db: db,
                     skuPattern: seriesBase,
+                    excludedSKUPrefix: queriedSKU,
                     isExactSKUMatch: false,
                     normalizedSelfMessageID: normalizedSelfMessageID,
                     maxResults: maxSeriesSupplementPerSKU,
-                    seenDedupKeys: &seenDedupKeys
+                    seenRecordIDs: &seenRecordIDs
                 )
                 combinedRows.append(contentsOf: seriesRows)
             }
@@ -655,8 +662,9 @@ public final class HistoricalPriceLookupService: Sendable {
             guard !combinedRows.isEmpty else { continue }
 
             let primaryCurrency = resolvePrimaryCurrency(from: combinedRows)
+            let canonicalPrimary = canonicalCurrency(primaryCurrency)
             let comparablePrices = combinedRows
-                .filter { primaryCurrency.isEmpty || $0.currency.caseInsensitiveCompare(primaryCurrency) == .orderedSame }
+                .filter { canonicalPrimary.isEmpty || canonicalCurrency($0.currency) == canonicalPrimary }
                 .map(\.unitPrice)
             let minPrice = comparablePrices.min()
             let maxPrice = comparablePrices.max()
@@ -677,13 +685,81 @@ public final class HistoricalPriceLookupService: Sendable {
         return groups
     }
 
+    private struct PriceDedupBucket {
+        let priceKey: String
+        let groupKey: String
+        var sku: String
+        var currency: String
+        var unitPrice: Double
+        var quantity: Double?
+        var priceType: String
+        var taxMode: String
+        var customerOrg: String
+        var projectName: String
+        var quoteDateISO: String
+        var subject: String
+        var rfcMessageID: String
+        var evidenceSnippet: String
+        var confidence: String
+        var occurrenceCount: Int
+
+        mutating func merge(from incoming: PriceDedupBucket) {
+            occurrenceCount += incoming.occurrenceCount
+            if incoming.quoteDateISO > quoteDateISO {
+                quoteDateISO = incoming.quoteDateISO
+                if !incoming.subject.isEmpty { subject = incoming.subject }
+                if !incoming.rfcMessageID.isEmpty { rfcMessageID = incoming.rfcMessageID }
+                if !incoming.evidenceSnippet.isEmpty { evidenceSnippet = incoming.evidenceSnippet }
+            }
+            if taxMode.isEmpty, !incoming.taxMode.isEmpty {
+                taxMode = incoming.taxMode
+            }
+            if customerOrg.isEmpty, !incoming.customerOrg.isEmpty {
+                customerOrg = incoming.customerOrg
+            }
+            if projectName.isEmpty, !incoming.projectName.isEmpty {
+                projectName = incoming.projectName
+            }
+            if quantity == nil, let incomingQty = incoming.quantity {
+                quantity = incomingQty
+            }
+            if priceTypeRank(incoming.priceType) < priceTypeRank(priceType) {
+                priceType = incoming.priceType
+            }
+            if confidenceRank(incoming.confidence) < confidenceRank(confidence) {
+                confidence = incoming.confidence
+            }
+        }
+
+        private func priceTypeRank(_ type: String) -> Int {
+            switch type.lowercased() {
+            case "order_price": return 0
+            case "spr_support": return 1
+            case "spr_request": return 2
+            case "quote": return 3
+            case "historical_price": return 4
+            case "": return 9
+            default: return 5
+            }
+        }
+
+        private func confidenceRank(_ conf: String) -> Int {
+            switch conf.lowercased() {
+            case "high": return 0
+            case "medium": return 1
+            default: return 2
+            }
+        }
+    }
+
     private static func queryPriceRows(
         db: OpaquePointer,
         skuPattern: String,
+        excludedSKUPrefix: String?,
         isExactSKUMatch: Bool,
         normalizedSelfMessageID: String,
         maxResults: Int,
-        seenDedupKeys: inout Set<String>
+        seenRecordIDs: inout Set<String>
     ) -> [HistoricalPriceRecord] {
         let sql = """
         SELECT
@@ -708,7 +784,7 @@ public final class HistoricalPriceLookupService: Sendable {
         ORDER BY v.quote_date_iso DESC,
                  CASE LOWER(v.confidence) WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
                  v.message_id DESC
-        LIMIT 80
+        LIMIT \(sqlScanLimit)
         """
 
         var stmt: OpaquePointer?
@@ -725,12 +801,20 @@ public final class HistoricalPriceLookupService: Sendable {
             _ = sqlite3_bind_text(stmt, 2, cStr, -1, sqliteTransient)
         }
 
-        var records: [HistoricalPriceRecord] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            guard records.count < maxResults else { break }
+        // Pass 1: Collapse rows sharing (SKU, canonical currency, rounded unitPrice, customer/project entity)
+        // across recurring dates (e.g., weekly cumulative billing reports).
+        var bucketsByKey: [String: PriceDedupBucket] = [:]
+        var bucketOrder: [String] = []
 
+        let excludedUpperPrefix = excludedSKUPrefix?.uppercased()
+
+        while sqlite3_step(stmt) == SQLITE_ROW {
             let sku = columnString(stmt, index: 0).trimmingCharacters(in: .whitespacesAndNewlines)
-            let currency = columnString(stmt, index: 1).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let excludedUpperPrefix, sku.uppercased().hasPrefix(excludedUpperPrefix) {
+                continue
+            }
+            let rawCurrency = columnString(stmt, index: 1).trimmingCharacters(in: .whitespacesAndNewlines)
+            let currency = canonicalCurrency(rawCurrency)
             guard sqlite3_column_type(stmt, 2) != SQLITE_NULL else { continue }
             let unitPrice = sqlite3_column_double(stmt, 2)
             guard unitPrice > 0 else { continue }
@@ -755,44 +839,146 @@ public final class HistoricalPriceLookupService: Sendable {
                 continue
             }
 
-            let dedupKey = [
-                sku.uppercased(),
-                String(format: "%.6f", unitPrice),
-                currency.uppercased(),
-                customerOrg,
-                projectName,
-                quoteDateISO
-            ].joined(separator: "|")
+            let roundedPrice = String(format: "%.2f", (unitPrice * 100).rounded() / 100)
+            let priceKey = "\(sku.uppercased())|\(currency)|\(roundedPrice)"
+            let entityKey: String
+            if !customerOrg.isEmpty {
+                entityKey = "cust:\(canonicalEntityText(customerOrg))"
+            } else if !projectName.isEmpty {
+                entityKey = "proj:\(canonicalEntityText(projectName))"
+            } else {
+                entityKey = "anon"
+            }
+            let groupKey = "\(priceKey)|\(entityKey)"
 
-            guard seenDedupKeys.insert(dedupKey).inserted else {
+            // Skip records already emitted in an earlier exact pass.
+            if seenRecordIDs.contains(groupKey) {
                 continue
             }
 
-            records.append(
-                HistoricalPriceRecord(
-                    sku: sku,
-                    currency: currency,
-                    unitPrice: unitPrice,
-                    quantity: quantity,
-                    priceType: priceType,
-                    taxMode: taxMode,
-                    customerOrg: customerOrg,
-                    projectName: projectName,
-                    quoteDateISO: quoteDateISO,
-                    subject: subject,
-                    rfcMessageID: rfcMessageID,
-                    evidenceSnippet: evidenceSnippet,
-                    confidence: confidence.isEmpty ? "medium" : confidence,
-                    isExactSKUMatch: isExactSKUMatch,
-                    mailJumpURL: nil
-                )
+            let incoming = PriceDedupBucket(
+                priceKey: priceKey,
+                groupKey: groupKey,
+                sku: sku,
+                currency: currency.isEmpty ? rawCurrency : currency,
+                unitPrice: unitPrice,
+                quantity: quantity,
+                priceType: priceType,
+                taxMode: taxMode,
+                customerOrg: customerOrg,
+                projectName: projectName,
+                quoteDateISO: quoteDateISO,
+                subject: subject,
+                rfcMessageID: rfcMessageID,
+                evidenceSnippet: evidenceSnippet,
+                confidence: confidence.isEmpty ? "medium" : confidence,
+                occurrenceCount: 1
             )
+
+            if var existing = bucketsByKey[groupKey] {
+                existing.merge(from: incoming)
+                bucketsByKey[groupKey] = existing
+            } else {
+                bucketsByKey[groupKey] = incoming
+                bucketOrder.append(groupKey)
+            }
         }
 
-        return records
+        // Pass 2: Collapse sparse rows (empty customerOrg) into a richer record at the same priceKey
+        // when project names overlap or when the sparse row has no project metadata at all.
+        var richBuckets: [PriceDedupBucket] = []
+        var sparseBuckets: [PriceDedupBucket] = []
+        for key in bucketOrder {
+            guard let bucket = bucketsByKey[key] else { continue }
+            if !bucket.customerOrg.isEmpty {
+                richBuckets.append(bucket)
+            } else {
+                sparseBuckets.append(bucket)
+            }
+        }
+
+        var remainingSparse: [PriceDedupBucket] = []
+        for sparse in sparseBuckets {
+            if let richIdx = richBuckets.firstIndex(where: { rich in
+                rich.priceKey == sparse.priceKey
+                    && (sparse.projectName.isEmpty || projectsOverlap(rich.projectName, sparse.projectName))
+            }) {
+                richBuckets[richIdx].merge(from: sparse)
+            } else if sparse.projectName.isEmpty,
+                      let anySamePriceIdx = remainingSparse.firstIndex(where: { $0.priceKey == sparse.priceKey })
+            {
+                remainingSparse[anySamePriceIdx].merge(from: sparse)
+            } else {
+                remainingSparse.append(sparse)
+            }
+        }
+
+        var mergedBuckets = richBuckets + remainingSparse
+        mergedBuckets.sort { lhs, rhs in
+            if lhs.quoteDateISO != rhs.quoteDateISO {
+                return lhs.quoteDateISO > rhs.quoteDateISO
+            }
+            if lhs.occurrenceCount != rhs.occurrenceCount {
+                return lhs.occurrenceCount > rhs.occurrenceCount
+            }
+            return lhs.groupKey < rhs.groupKey
+        }
+
+        let limited = Array(mergedBuckets.prefix(maxResults))
+        for bucket in limited {
+            seenRecordIDs.insert(bucket.groupKey)
+        }
+
+        return limited.map { bucket in
+            HistoricalPriceRecord(
+                sku: bucket.sku,
+                currency: bucket.currency,
+                unitPrice: bucket.unitPrice,
+                quantity: bucket.quantity,
+                priceType: bucket.priceType,
+                taxMode: bucket.taxMode,
+                customerOrg: bucket.customerOrg,
+                projectName: bucket.projectName,
+                quoteDateISO: bucket.quoteDateISO,
+                subject: bucket.subject,
+                rfcMessageID: bucket.rfcMessageID,
+                evidenceSnippet: bucket.evidenceSnippet,
+                confidence: bucket.confidence,
+                isExactSKUMatch: isExactSKUMatch,
+                occurrenceCount: bucket.occurrenceCount,
+                mailJumpURL: nil
+            )
+        }
     }
 
     // MARK: - Private Utilities
+
+    private static func canonicalCurrency(_ raw: String) -> String {
+        let upper = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        switch upper {
+        case "CNY", "RMB", "人民币", "¥":
+            return "RMB"
+        default:
+            return upper
+        }
+    }
+
+    private static func canonicalEntityText(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+    }
+
+    private static func projectsOverlap(_ lhs: String, _ rhs: String) -> Bool {
+        let a = canonicalEntityText(lhs)
+        let b = canonicalEntityText(rhs)
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        if a == b { return true }
+        let shorter = a.count <= b.count ? a : b
+        let longer = a.count <= b.count ? b : a
+        guard shorter.count >= 3 else { return false }
+        return longer.contains(shorter)
+    }
 
     private static func seriesFallbackBase(for sku: String) -> String? {
         let segments = sku.split(separator: "-", omittingEmptySubsequences: true)
@@ -804,14 +990,14 @@ public final class HistoricalPriceLookupService: Sendable {
 
     private static func resolvePrimaryCurrency(from records: [HistoricalPriceRecord]) -> String {
         var counts: [String: Int] = [:]
-        var firstSeenByUpper: [String: String] = [:]
+        var firstSeenByCanonical: [String: String] = [:]
         for record in records {
             let trimmed = record.currency.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            let upper = trimmed.uppercased()
-            counts[upper, default: 0] += 1
-            if firstSeenByUpper[upper] == nil {
-                firstSeenByUpper[upper] = trimmed
+            let canonical = canonicalCurrency(trimmed)
+            counts[canonical, default: 0] += 1
+            if firstSeenByCanonical[canonical] == nil {
+                firstSeenByCanonical[canonical] = canonical == "RMB" ? "RMB" : trimmed
             }
         }
         guard let best = counts.max(by: { lhs, rhs in
@@ -824,7 +1010,7 @@ public final class HistoricalPriceLookupService: Sendable {
         }) else {
             return ""
         }
-        return firstSeenByUpper[best.key] ?? best.key
+        return firstSeenByCanonical[best.key] ?? best.key
     }
 
     private static func currentEmailPriceHint(for queriedSKU: String, analysis: EmailAIAnalysis?) -> String? {

@@ -471,6 +471,136 @@ final class HistoricalPriceLookupTests: XCTestCase {
         XCTAssertEqual(record.mailJumpURL, URL(string: "message://%3Ccold-fallback-1@moxa.com%3E"))
     }
 
+    func testDeduplicatesWeeklyBillingAndSparseAnonymousRowsAcrossDates() async throws {
+        try buildMockOutlookDatabase(at: dbURL) { db in
+            let dates = ["2026-10-21", "2026-09-14", "2026-08-10", "2026-07-08", "2026-06-15", "2026-05-29"]
+            for (idx, date) in dates.enumerated() {
+                let project = idx.isMultiple(of: 2)
+                    ? "波尔图地铁首车-青岛四方所-TN-4908"
+                    : "波尔图二期防火墙——四方所——TN-4908-4GTX-WV-CT-T *25"
+                let msgID = try insertMessage(
+                    db: db,
+                    messageID: "weekly-billing-\(idx)@moxa.com",
+                    subject: "【2026每周出货明细】\(date)",
+                    dateISO: date,
+                    projectName: project,
+                    customerOrg: "浙江中自庆安新能源技术有限公司"
+                )
+                try insertPrice(
+                    db: db,
+                    messageRowID: msgID,
+                    sku: "TN-4908-4GTX-WV-CT-T",
+                    currency: idx == 1 ? "CNY" : "RMB",
+                    unitPrice: 16350.0,
+                    quantity: 2,
+                    priceType: "order_price",
+                    taxMode: idx == 2 ? "" : "未税",
+                    customerOrg: "浙江中自庆安新能源技术有限公司",
+                    projectName: project,
+                    quoteDateISO: date,
+                    evidenceSnippet: "Billing \(date)",
+                    confidence: "high"
+                )
+            }
+
+            // Anonymous metadata-sparse echo at the same 16350 price -> should merge into richer 16350 record
+            let anonMsg = try insertMessage(
+                db: db,
+                messageID: "anon-echo-16350@moxa.com",
+                subject: "Price note",
+                dateISO: "2026-04-01",
+                projectName: "",
+                customerOrg: ""
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: anonMsg,
+                sku: "TN-4908-4GTX-WV-CT-T",
+                currency: "RMB",
+                unitPrice: 16350.0,
+                quantity: nil,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "",
+                projectName: "",
+                quoteDateISO: "2026-04-01",
+                evidenceSnippet: "16350 quote",
+                confidence: "medium"
+            )
+
+            // Distinct customer + lower price
+            let otherCustMsg = try insertMessage(
+                db: db,
+                messageID: "hangzhou-14400@moxa.com",
+                subject: "杭州地铁 15 号线报价",
+                dateISO: "2025-08-05",
+                projectName: "杭州地铁 15 号线",
+                customerOrg: "南京信源通"
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: otherCustMsg,
+                sku: "TN-4908-4GTX-WV-CT-T",
+                currency: "RMB",
+                unitPrice: 14400.0,
+                quantity: 12,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "南京信源通",
+                projectName: "杭州地铁 15 号线",
+                quoteDateISO: "2025-08-05",
+                evidenceSnippet: "14400 quote",
+                confidence: "high"
+            )
+
+            // Distinct higher price with project name only
+            let projectOnlyMsg = try insertMessage(
+                db: db,
+                messageID: "porto-16500@moxa.com",
+                subject: "波尔图地铁二期(红宝石)",
+                dateISO: "2026-01-15",
+                projectName: "波尔图地铁二期(红宝石)",
+                customerOrg: ""
+            )
+            try insertPrice(
+                db: db,
+                messageRowID: projectOnlyMsg,
+                sku: "TN-4908-4GTX-WV-CT-T",
+                currency: "CNY",
+                unitPrice: 16500.0,
+                quantity: 25,
+                priceType: "quote",
+                taxMode: "未税",
+                customerOrg: "",
+                projectName: "波尔图地铁二期(红宝石)",
+                quoteDateISO: "2026-01-15",
+                evidenceSnippet: "16500 quote",
+                confidence: "high"
+            )
+        }
+
+        let email = makeEmail(
+            subject: "核价 TN-4908-4GTX-WV-CT-T",
+            plainBody: "请查询 TN-4908-4GTX-WV-CT-T 历史报价。"
+        )
+        let groups = await service.lookupRelatedPrices(for: email, runtimeDBPath: dbURL.path)
+        XCTAssertEqual(groups.count, 1)
+
+        let group = try XCTUnwrap(groups.first)
+        XCTAssertEqual(group.primaryCurrency, "RMB")
+        XCTAssertEqual(group.minUnitPrice ?? 0, 14400.0, accuracy: 0.001)
+        XCTAssertEqual(group.maxUnitPrice ?? 0, 16500.0, accuracy: 0.001)
+        XCTAssertEqual(group.records.count, 3)
+
+        let merged16350 = try XCTUnwrap(group.records.first(where: { abs($0.unitPrice - 16350.0) < 0.01 }))
+        XCTAssertEqual(merged16350.occurrenceCount, 7)
+        XCTAssertEqual(merged16350.quoteDateISO, "2026-10-21")
+        XCTAssertEqual(merged16350.customerOrg, "浙江中自庆安新能源技术有限公司")
+        XCTAssertEqual(merged16350.currency, "RMB")
+
+        XCTAssertEqual(group.records.map(\.quoteDateISO), ["2026-10-21", "2026-01-15", "2025-08-05"])
+    }
+
     // MARK: - Helpers
 
     private func makeEmail(
