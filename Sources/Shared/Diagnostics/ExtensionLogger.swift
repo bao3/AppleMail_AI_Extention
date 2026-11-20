@@ -1,0 +1,27 @@
+import Foundation
+import OSLog
+
+/// Centralized Unified Logging (`os.Logger`) for operational troubleshooting.
+/// Inspect live logs on macOS with:
+/// `log stream --predicate 'subsystem == "com.bao3.AppleMailAI"' --level debug`
+public enum ExtensionLogger {
+    public static let subsystem = "com.bao3.AppleMailAI"
+
+    public static let lifecycle = Logger(subsystem: subsystem, category: "lifecycle")
+    public static let security = Logger(subsystem: subsystem, category: "security")
+    public static let compose = Logger(subsystem: subsystem, category: "compose")
+    public static let mime = Logger(subsystem: subsystem, category: "mime")
+    public static let keychain = Logger(subsystem: subsystem, category: "keychain")
+    public static let cache = Logger(subsystem: subsystem, category: "cache")
+    public static let network = Logger(subsystem: subsystem, category: "network")
+}
+
+/// Ops kill-switch flags readable via `UserDefaults.standard` (e.g., `defaults write com.bao3.AppleMailAI.Extension ...`).
+public enum ExtensionOpsConfig {
+    /// Set to `true` to disable `MEMessageSecurityHandler` banner injection while keeping `MEComposeSessionHandler` active.
+    public static let disableSecurityBannerKey = "com.bao3.AppleMailAI.disableSecurityBanner"
+
+    public static var isSecurityBannerDisabled: Bool {
+        UserDefaults.standard.bool(forKey: disableSecurityBannerKey)
+    }
+}

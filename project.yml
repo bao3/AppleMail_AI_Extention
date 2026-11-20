@@ -1,0 +1,101 @@
+name: AppleMailAI
+options:
+  bundleIdPrefix: com.bao3
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
+settings:
+  base:
+    ARCHS: arm64
+    VALID_ARCHS: arm64
+    EXCLUDED_ARCHS: x86_64
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_VERSION: "6.0"
+    CLANG_ENABLE_MODULES: YES
+    ENABLE_HARDENED_RUNTIME: YES
+    COMBINE_HIDPI_IMAGES: YES
+targets:
+  AppleMailAI:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/Shared
+      - path: Sources/HostApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI
+        INFOPLIST_FILE: Config/HostApp-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/HostApp.entitlements
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+    dependencies:
+      - target: MailAIExtension
+        embed: true
+      - sdk: MailKit.framework
+      - sdk: Security.framework
+      - sdk: AppKit.framework
+      - sdk: SwiftUI.framework
+  MailAIExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Sources/Shared
+      - path: Sources/MailExtension
+      - path: Resources/ExtensionAssets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI.Extension
+        INFOPLIST_FILE: Config/Extension-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Config/Extension.entitlements
+        SKIP_INSTALL: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
+    dependencies:
+      - sdk: MailKit.framework
+      - sdk: Security.framework
+      - sdk: AppKit.framework
+      - sdk: SwiftUI.framework
+  AppleMailAITests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Sources/Shared
+      - path: Sources/MailExtension
+      - path: Tests/AppleMailAITests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI.Tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        PROVISIONING_PROFILE_SPECIFIER: ""
+    dependencies:
+      - sdk: MailKit.framework
+      - sdk: Security.framework
+      - sdk: AppKit.framework
+      - sdk: SwiftUI.framework
+schemes:
+  AppleMailAI:
+    build:
+      targets:
+        AppleMailAI: all
+        MailAIExtension: all
+        AppleMailAITests: [test]
+    test:
+      targets:
+        - AppleMailAITests
+  AppleMailAITests:
+    build:
+      targets:
+        AppleMailAITests: [build, test]
+    test:
+      targets:
+        - AppleMailAITests

@@ -1,0 +1,16 @@
+.DS_Store
+build/
+DerivedData/
+*.xcuserdata/
+xcuserdata/
+*.xcuserstate
+Config/LocalSigning.xcconfig
+.swiftpm/
+.env
+.env.*
+*.key
+*.secret
+*.pem
+*.p12
+*.mobileprovision
+*.cer
