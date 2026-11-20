@@ -30,17 +30,21 @@ public final class VertexGeminiClient: Sendable {
     public static let shared = VertexGeminiClient()
 
     private let session: URLSession
+    private let aiClient: AIServiceClient
 
     public init(session: URLSession? = nil) {
         if let session {
             self.session = session
+            self.aiClient = AIServiceClient(session: session)
         } else {
             let config = URLSessionConfiguration.ephemeral
             config.timeoutIntervalForRequest = 60
-            config.timeoutIntervalForResource = 90
-            config.httpMaximumConnectionsPerHost = 4
+            config.timeoutIntervalForResource = 120
+            config.httpMaximumConnectionsPerHost = 6
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
-            self.session = URLSession(configuration: config)
+            let createdSession = URLSession(configuration: config)
+            self.session = createdSession
+            self.aiClient = AIServiceClient(session: createdSession)
         }
     }
 
@@ -102,98 +106,25 @@ public final class VertexGeminiClient: Sendable {
             throw VertexGeminiError.missingProjectID
         }
 
-        let systemText = """
-        你是一名资深 B2B 工业通信、硬件工程与外贸商务邮件分析助手。请严格依据提供的邮件原文（头信息、附件文件名、最新正文、历史引用链）提取高信息密度中文分析，禁止捏造邮件中未出现的数据。
-        输出要求（必须严格遵循 JSON Schema）：
-        1. headline：用一句话概括这封邮件最核心的结论或诉求。
-        2. coreConclusions：3~6 条高凝练核心要点（直奔主题，突出决策、变更、风险、交期或报价变化）。
-        3. todos：提取明确或隐含的待办事项（task、owner 负责方、deadline 截止时间原文描述若无填 ""、dueDateISO 若邮件明确提到或可依据邮件 Date 推算出具体任务日期则填 "YYYY-MM-DD"，例如 "本周五/11月25日前"，若邮件未提及任务时间必须填 ""、priority 仅可为 "high" / "medium" / "low"）。
-        4. businessElements：
-           - projects：提及的项目名称、项目编号或客户内部代号；
-           - customers：客户公司、终端用户、相关团队或联系人；
-           - models：产品型号、SKU、物料号（Part Number）、规格配置；
-           - pricing：所有报价明细（itemOrModel、quantity、unitPrice、currency、termsOrLeadTime 贸易条款/交期、notes）。若某子项未提及填 ""。
-        5. plainChineseTranslation：若最新正文包含英文或外文内容，准确翻译为通俗、自然、符合中国工程师与商务习惯的简体中文；若原信已是简体中文，仅输出 2~3 句精炼白话摘要（不要逐字复述中文原文），不丢失关键数字与技术名词。
-        6. timeline：如果是长信或多轮往来邮件，按时间由早到晚梳理最多 5 个关键来往节点（timeOrStep、actor、summary）；如果是单封短邮件，仅输出 1 个关键节点。
-        7. suggestedFlag 与 flagReason：从下列 8 个值中选出最匹配邮件核心属性的唯一旗标 `suggestedFlag`（并用不超过 18 个汉字在 `flagReason` 说明原因）：
-           - "red"（紧急待回：需要尽快回复、有紧迫截止时间或高优阻塞项）
-           - "orange"（等审批：特价申请、MOQ 调整、用印/合同/流程签核）
-           - "yellow"（跟报价：询价、报价单、BOM 核价、PI、折扣或交期谈判）
-           - "green"（重点项目：核心轨交/工业项目推进、招投标、重要里程碑）
-           - "blue"（技术卡点：软硬件故障、规格确认、安规认证/测试报告卡点）
-           - "purple"（产品变更：PCN / EOL、Label 变更、新产品大类或物料变更）
-           - "gray"（发票报销：发票、差旅报销、付款结算提醒）
-           - "none"（一般知悉类邮件，无需打标）
-        """
-
-        let bodyObject: [String: Any] = [
-            "systemInstruction": [
-                "parts": [
-                    ["text": systemText]
-                ]
-            ],
-            "contents": [
-                [
-                    "role": "user",
-                    "parts": [
-                        ["text": email.formattedPromptInput()]
-                    ]
-                ]
-            ],
-            "generationConfig": [
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-                "responseSchema": Self.emailAnalysisResponseSchema(),
-                "thinkingConfig": model.thinkingConfig
-            ]
-        ]
-
-        let started = Date()
-        let responseData = try await sendRequest(
-            url: model.generateContentURL(projectID: resolvedProjectID),
-            apiKey: trimmedKey,
-            bodyObject: bodyObject
+        let profile = AIProviderProfile(
+            id: AIProviderProfile.defaultVertexProfileID,
+            name: "Vertex AI",
+            kind: .vertexAI,
+            projectID: resolvedProjectID,
+            location: GeminiModel.vertexLocation,
+            fastModel: model.rawValue,
+            deepModel: model.rawValue
         )
-        let latencyMs = Int(Date().timeIntervalSince(started) * 1000)
-
-        let extracted = try Self.extractJSONTextAndUsage(from: responseData)
-        let payloadData = Data(extracted.jsonText.utf8)
-
-        struct RawEmailAnalysisPayload: Decodable {
-            let headline: String
-            let coreConclusions: [String]
-            let todos: [EmailTodoItem]
-            let businessElements: BusinessElements
-            let plainChineseTranslation: String
-            let timeline: [TimelineEvent]
-            let suggestedFlag: String?
-            let flagReason: String?
-        }
 
         do {
-            let decoded = try JSONDecoder().decode(RawEmailAnalysisPayload.self, from: payloadData)
-            return EmailAIAnalysis(
-                headline: decoded.headline,
-                coreConclusions: decoded.coreConclusions,
-                todos: decoded.todos,
-                businessElements: decoded.businessElements,
-                plainChineseTranslation: decoded.plainChineseTranslation,
-                timeline: decoded.timeline,
-                suggestedFlag: decoded.suggestedFlag,
-                flagReason: decoded.flagReason,
-                messageID: email.messageID,
-                modelUsed: model.rawValue,
-                analyzedAt: Date(),
-                promptTokens: extracted.promptTokens,
-                outputTokens: extracted.outputTokens,
-                cachedTokens: extracted.cachedTokens,
-                latencyMs: latencyMs
+            return try await aiClient.analyzeEmail(
+                email,
+                profile: profile,
+                tier: AIModelTier(legacyModel: model),
+                apiKeyOverride: trimmedKey
             )
-        } catch {
-            throw VertexGeminiError.malformedJSON(
-                rawText: extracted.jsonText,
-                underlyingError: error.localizedDescription
-            )
+        } catch let error as AIServiceError {
+            throw Self.mapAIServiceError(error)
         }
     }
 
@@ -219,85 +150,46 @@ public final class VertexGeminiClient: Sendable {
             throw VertexGeminiError.missingProjectID
         }
 
-        let systemText = """
-        你是一名精通跨国商务与技术沟通的双语邮件撰写专家。请根据用户意图、收件人信息以及原邮件上下文，撰写专业、地道、直接可用的英文回复草稿、中文回复草稿，以及中英双语对照版。
-        风格要求：语气「\(tone)」，准确核对并沿用原信中的项目名、型号、数量、单价、交期与条款（不可擅自篡改数字）。
-        输出 JSON 字段：
-        - suggestedSubject：建议邮件主题；
-        - englishDraft：可直接发送的地道英文邮件正文（含称呼与落款占位）；
-        - chineseDraft：对应语义自然准确的中文邮件正文；
-        - bilingualCombinedDraft：便于双语留档或发给双语团队的中英双语合并版本；
-        - keyPointsCovered：本次回复涵盖的关键要点列表。
-        """
-
-        var userPromptLines: [String] = []
-        userPromptLines.append("当前草稿主题：\(draftSubject.isEmpty ? "(未填写)" : draftSubject)")
-        if !recipients.isEmpty {
-            userPromptLines.append("收件人：\(recipients.joined(separator: ", "))")
-        }
-        userPromptLines.append("回复语气：\(tone)")
-        userPromptLines.append("用户希望表达的核心意图 / 回复要点：\n\(userIntent.trimmingCharacters(in: .whitespacesAndNewlines))")
-
-        if let originalEmail {
-            userPromptLines.append("")
-            userPromptLines.append("=== 原信上下文 ===")
-            userPromptLines.append(originalEmail.formattedPromptInput())
-        }
-
-        let bodyObject: [String: Any] = [
-            "systemInstruction": [
-                "parts": [
-                    ["text": systemText]
-                ]
-            ],
-            "contents": [
-                [
-                    "role": "user",
-                    "parts": [
-                        ["text": userPromptLines.joined(separator: "\n")]
-                    ]
-                ]
-            ],
-            "generationConfig": [
-                "temperature": 0.3,
-                "responseMimeType": "application/json",
-                "responseSchema": Self.composeReplyResponseSchema(),
-                "thinkingConfig": model.thinkingConfig
-            ]
-        ]
-
-        let responseData = try await sendRequest(
-            url: model.generateContentURL(projectID: resolvedProjectID),
-            apiKey: trimmedKey,
-            bodyObject: bodyObject
+        let profile = AIProviderProfile(
+            id: AIProviderProfile.defaultVertexProfileID,
+            name: "Vertex AI",
+            kind: .vertexAI,
+            projectID: resolvedProjectID,
+            location: GeminiModel.vertexLocation,
+            fastModel: model.rawValue,
+            deepModel: model.rawValue
         )
-        let extracted = try Self.extractJSONTextAndUsage(from: responseData)
-        let payloadData = Data(extracted.jsonText.utf8)
-
-        struct RawComposePayload: Decodable {
-            let suggestedSubject: String
-            let englishDraft: String
-            let chineseDraft: String
-            let bilingualCombinedDraft: String
-            let keyPointsCovered: [String]
-        }
 
         do {
-            let decoded = try JSONDecoder().decode(RawComposePayload.self, from: payloadData)
-            return ComposeReplyDraft(
-                suggestedSubject: decoded.suggestedSubject,
-                englishDraft: decoded.englishDraft,
-                chineseDraft: decoded.chineseDraft,
-                bilingualCombinedDraft: decoded.bilingualCombinedDraft,
-                keyPointsCovered: decoded.keyPointsCovered,
-                modelUsed: model.rawValue,
-                generatedAt: Date()
+            return try await aiClient.generateReplyDraft(
+                originalEmail: originalEmail,
+                draftSubject: draftSubject,
+                recipients: recipients,
+                userIntent: userIntent,
+                tone: tone,
+                profile: profile,
+                tier: AIModelTier(legacyModel: model),
+                apiKeyOverride: trimmedKey
             )
-        } catch {
-            throw VertexGeminiError.malformedJSON(
-                rawText: extracted.jsonText,
-                underlyingError: error.localizedDescription
-            )
+        } catch let error as AIServiceError {
+            throw Self.mapAIServiceError(error)
+        }
+    }
+
+    private static func mapAIServiceError(_ error: AIServiceError) -> VertexGeminiError {
+        switch error {
+        case .missingAPIKey:
+            return .missingAPIKey
+        case .missingProjectID:
+            return .missingProjectID
+        case .invalidBaseURL, .invalidResponse:
+            return .invalidResponse
+        case let .httpError(statusCode, message):
+            return .httpError(statusCode: statusCode, message: message)
+        case .emptyModelOutput:
+            return .emptyModelOutput
+        case let .malformedJSON(rawText, underlyingError):
+            return .malformedJSON(rawText: rawText, underlyingError: underlyingError)
         }
     }
 
@@ -382,131 +274,10 @@ public final class VertexGeminiClient: Sendable {
         }
 
         guard (200..<300).contains(http.statusCode) else {
-            let serverMsg = extractServerErrorMessage(from: data)
+            let serverMsg = AIServiceClient.extractServerErrorMessage(from: data)
             throw VertexGeminiError.httpError(statusCode: http.statusCode, message: serverMsg)
         }
 
         return data
-    }
-
-    private func extractServerErrorMessage(from data: Data) -> String {
-        struct ErrorEnvelope: Decodable {
-            struct Inner: Decodable {
-                let message: String?
-                let status: String?
-            }
-            let error: Inner?
-        }
-        if let parsed = try? JSONDecoder().decode(ErrorEnvelope.self, from: data),
-           let message = parsed.error?.message
-        {
-            if let status = parsed.error?.status, !status.isEmpty {
-                return "[\(status)] \(message)"
-            }
-            return message
-        }
-        let raw = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        return raw.isEmpty ? "未知服务端错误" : String(raw.prefix(400))
-    }
-
-    // MARK: - OpenAPI Subset Schemas for Vertex AI v1beta1
-
-    private static func emailAnalysisResponseSchema() -> [String: Any] {
-        [
-            "type": "OBJECT",
-            "properties": [
-                "headline": ["type": "STRING"],
-                "coreConclusions": [
-                    "type": "ARRAY",
-                    "items": ["type": "STRING"]
-                ],
-                "todos": [
-                    "type": "ARRAY",
-                    "items": [
-                        "type": "OBJECT",
-                        "properties": [
-                            "task": ["type": "STRING"],
-                            "owner": ["type": "STRING"],
-                            "deadline": ["type": "STRING"],
-                            "dueDateISO": ["type": "STRING"],
-                            "priority": ["type": "STRING"]
-                        ],
-                        "required": ["task", "owner", "deadline", "dueDateISO", "priority"]
-                    ]
-                ],
-                "businessElements": [
-                    "type": "OBJECT",
-                    "properties": [
-                        "projects": ["type": "ARRAY", "items": ["type": "STRING"]],
-                        "customers": ["type": "ARRAY", "items": ["type": "STRING"]],
-                        "models": ["type": "ARRAY", "items": ["type": "STRING"]],
-                        "pricing": [
-                            "type": "ARRAY",
-                            "items": [
-                                "type": "OBJECT",
-                                "properties": [
-                                    "itemOrModel": ["type": "STRING"],
-                                    "quantity": ["type": "STRING"],
-                                    "unitPrice": ["type": "STRING"],
-                                    "currency": ["type": "STRING"],
-                                    "termsOrLeadTime": ["type": "STRING"],
-                                    "notes": ["type": "STRING"]
-                                ],
-                                "required": ["itemOrModel", "quantity", "unitPrice", "currency", "termsOrLeadTime", "notes"]
-                            ]
-                        ]
-                    ],
-                    "required": ["projects", "customers", "models", "pricing"]
-                ],
-                "plainChineseTranslation": ["type": "STRING"],
-                "timeline": [
-                    "type": "ARRAY",
-                    "items": [
-                        "type": "OBJECT",
-                        "properties": [
-                            "timeOrStep": ["type": "STRING"],
-                            "actor": ["type": "STRING"],
-                            "summary": ["type": "STRING"]
-                        ],
-                        "required": ["timeOrStep", "actor", "summary"]
-                    ]
-                ],
-                "suggestedFlag": ["type": "STRING"],
-                "flagReason": ["type": "STRING"]
-            ],
-            "required": [
-                "headline",
-                "coreConclusions",
-                "todos",
-                "businessElements",
-                "plainChineseTranslation",
-                "timeline",
-                "suggestedFlag",
-                "flagReason"
-            ]
-        ]
-    }
-
-    private static func composeReplyResponseSchema() -> [String: Any] {
-        [
-            "type": "OBJECT",
-            "properties": [
-                "suggestedSubject": ["type": "STRING"],
-                "englishDraft": ["type": "STRING"],
-                "chineseDraft": ["type": "STRING"],
-                "bilingualCombinedDraft": ["type": "STRING"],
-                "keyPointsCovered": [
-                    "type": "ARRAY",
-                    "items": ["type": "STRING"]
-                ]
-            ],
-            "required": [
-                "suggestedSubject",
-                "englishDraft",
-                "chineseDraft",
-                "bilingualCombinedDraft",
-                "keyPointsCovered"
-            ]
-        ]
     }
 }

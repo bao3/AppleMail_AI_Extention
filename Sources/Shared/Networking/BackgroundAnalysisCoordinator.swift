@@ -27,26 +27,23 @@ public actor BackgroundAnalysisCoordinator {
     public let maxConcurrent: Int
     public let maxQueued: Int
 
-    private let client: VertexGeminiClient
+    private let aiClient: AIServiceClient
     private let cacheStore: AnalysisCacheStore
-    private let keychainStore: KeychainStore
 
     private var activeCount: Int = 0
     private var waiters: [CheckedContinuation<Void, Error>] = []
     private var inFlightTasks: [String: Task<EmailAIAnalysis, Error>] = [:]
 
     public init(
-        maxConcurrent: Int = 2,
+        maxConcurrent: Int = 3,
         maxQueued: Int = 12,
-        client: VertexGeminiClient = .shared,
-        cacheStore: AnalysisCacheStore = .shared,
-        keychainStore: KeychainStore = .shared
+        aiClient: AIServiceClient = .shared,
+        cacheStore: AnalysisCacheStore = .shared
     ) {
         self.maxConcurrent = max(1, maxConcurrent)
         self.maxQueued = max(1, maxQueued)
-        self.client = client
+        self.aiClient = aiClient
         self.cacheStore = cacheStore
-        self.keychainStore = keychainStore
     }
 
     /// Returns any currently active or queued task for `messageID` so UI panels can attach instead of duplicating API calls.
@@ -62,10 +59,17 @@ public actor BackgroundAnalysisCoordinator {
         email: ParsedEmailContext,
         model: GeminiModel = .flash38
     ) async throws -> EmailAIAnalysis {
+        try await analyzeIfNeeded(email: email, tier: AIModelTier(legacyModel: model))
+    }
+
+    public func analyzeIfNeeded(
+        email: ParsedEmailContext,
+        tier: AIModelTier
+    ) async throws -> EmailAIAnalysis {
         if let cached = cacheStore.load(forMessageID: email.messageID) {
             return cached
         }
-        let task = enqueueTaskIfNeeded(email: email, model: model)
+        let task = enqueueTaskIfNeeded(email: email, tier: tier)
         return try await task.value
     }
 
@@ -75,13 +79,21 @@ public actor BackgroundAnalysisCoordinator {
         email: ParsedEmailContext,
         model: GeminiModel = .flash38
     ) -> Task<EmailAIAnalysis, Error> {
+        enqueueTaskIfNeeded(email: email, tier: AIModelTier(legacyModel: model))
+    }
+
+    @discardableResult
+    public func enqueueTaskIfNeeded(
+        email: ParsedEmailContext,
+        tier: AIModelTier
+    ) -> Task<EmailAIAnalysis, Error> {
         let key = AnalysisCacheStore.cacheKey(forMessageID: email.messageID)
         if let existing = inFlightTasks[key] {
             return existing
         }
 
         let task = Task<EmailAIAnalysis, Error> {
-            try await self.performQueuedAnalysis(key: key, email: email, model: model)
+            try await self.performQueuedAnalysis(key: key, email: email, tier: tier)
         }
         inFlightTasks[key] = task
         return task
@@ -90,7 +102,7 @@ public actor BackgroundAnalysisCoordinator {
     private func performQueuedAnalysis(
         key: String,
         email: ParsedEmailContext,
-        model: GeminiModel
+        tier: AIModelTier
     ) async throws -> EmailAIAnalysis {
         defer {
             inFlightTasks.removeValue(forKey: key)
@@ -109,14 +121,6 @@ public actor BackgroundAnalysisCoordinator {
             return cached
         }
 
-        guard let apiKey = keychainStore.loadAPIKey() else {
-            throw VertexGeminiError.missingAPIKey
-        }
-        let projectID = keychainStore.loadProjectID().trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !projectID.isEmpty else {
-            throw BackgroundAnalysisError.missingProjectID
-        }
-
         let activity = ActivityBox(
             token: ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiatedAllowingIdleSystemSleep, .suddenTerminationDisabled],
@@ -127,15 +131,10 @@ public actor BackgroundAnalysisCoordinator {
             ProcessInfo.processInfo.endActivity(activity.token)
         }
 
-        let result = try await client.analyzeEmail(
-            email,
-            model: model,
-            apiKey: apiKey,
-            projectID: projectID
-        )
+        let result = try await aiClient.analyzeEmail(email, tier: tier)
         try cacheStore.save(result, forMessageID: email.messageID)
         ExtensionLogger.action.info(
-            "Background analysis cached (messageID=\(email.messageID, privacy: .private), model=\(model.rawValue, privacy: .public), latencyMs=\(result.latencyMs ?? -1, privacy: .public))"
+            "Background analysis cached (messageID=\(email.messageID, privacy: .private), model=\(result.modelUsed, privacy: .public), latencyMs=\(result.latencyMs ?? -1, privacy: .public))"
         )
         return result
     }
