@@ -178,7 +178,7 @@ final class AttachmentFilingViewModel: ObservableObject {
         }
         let segments = folder.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         if !folder.isEmpty && segments.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.hasPrefix(".") }) {
-            return "路径禁止包含空段、.. 或隐藏目录（如 .moxa-kb）"
+            return "路径禁止包含空段、.. 或隐藏目录（如 .mailkb）"
         }
         if file == "." || file == ".." || file.hasPrefix(".") {
             return "文件名不能以点开头或为 .."
@@ -345,7 +345,7 @@ public struct AttachmentFilingSheet: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("尚未授权归档工作区目录（例如 Documents/Moxa）。")
+                    Text("尚未授权归档工作区目录。")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.orange)
                     Text("请点击右上角「选择/更换归档根目录…」授予 macOS 安全作用域目录权限，然后再预览推荐目录并保存。")

@@ -28,21 +28,31 @@ public enum KeychainError: LocalizedError {
 public final class KeychainStore: @unchecked Sendable {
     public static let shared = KeychainStore(
         service: KeychainStore.defaultService,
-        userDefaults: SharedAppGroup.sharedUserDefaults
+        userDefaults: SharedAppGroup.sharedUserDefaults,
+        fallbackService: KeychainStore.legacyService
     )
 
-    public static let defaultService = "com.bao3.AppleMailAI.vertex-api-key"
+    public static let defaultService = "com.bao3.MailKBAI.vertex-api-key"
+    public static let legacyService = "com.bao3.AppleMailAI.vertex-api-key"
     public static let apiKeyAccount = "vertex-api-key"
     public static let modelPrefAccount = "preferred-gemini-model"
-    public static let userDefaultsModelKey = "com.bao3.AppleMailAI.preferredModel"
-    public static let userDefaultsProjectIDKey = "com.bao3.AppleMailAI.vertexProjectID"
+    public static let userDefaultsModelKey = "com.bao3.MailKBAI.preferredModel"
+    public static let legacyUserDefaultsModelKey = "com.bao3.AppleMailAI.preferredModel"
+    public static let userDefaultsProjectIDKey = "com.bao3.MailKBAI.vertexProjectID"
+    public static let legacyUserDefaultsProjectIDKey = "com.bao3.AppleMailAI.vertexProjectID"
 
     public let service: String
+    private let fallbackService: String?
     private let userDefaults: UserDefaults
 
-    public init(service: String = KeychainStore.defaultService, userDefaults: UserDefaults = .standard) {
+    public init(
+        service: String = KeychainStore.defaultService,
+        userDefaults: UserDefaults = .standard,
+        fallbackService: String? = nil
+    ) {
         self.service = service
         self.userDefaults = userDefaults
+        self.fallbackService = fallbackService
     }
 
     public static func accountName(forProfileID profileID: String) -> String {
@@ -125,6 +135,11 @@ public final class KeychainStore: @unchecked Sendable {
         {
             return model
         }
+        if let raw = userDefaults.string(forKey: Self.legacyUserDefaultsModelKey),
+           let model = GeminiModel(rawValue: raw)
+        {
+            return model
+        }
         return GeminiModel.defaultModel
     }
 
@@ -140,6 +155,12 @@ public final class KeychainStore: @unchecked Sendable {
            !stored.isEmpty
         {
             return stored
+        }
+        if let legacyStored = userDefaults.string(forKey: Self.legacyUserDefaultsProjectIDKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !legacyStored.isEmpty
+        {
+            return legacyStored
         }
         if let env = ProcessInfo.processInfo.environment["VERTEX_PROJECT_ID"]?
             .trimmingCharacters(in: .whitespacesAndNewlines),
@@ -161,16 +182,26 @@ public final class KeychainStore: @unchecked Sendable {
 
     // MARK: - Low-level Keychain Operations
 
-    private func baseQuery(account: String) -> [String: Any] {
+    private func baseQuery(account: String, serviceOverride: String? = nil) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: serviceOverride ?? service,
             kSecAttrAccount as String: account
         ]
     }
 
     private func readGenericPasswordData(account: String) -> Data? {
-        var query = baseQuery(account: account)
+        if let primary = readGenericPasswordData(account: account, serviceName: service) {
+            return primary
+        }
+        if let fallbackService, fallbackService != service {
+            return readGenericPasswordData(account: account, serviceName: fallbackService)
+        }
+        return nil
+    }
+
+    private func readGenericPasswordData(account: String, serviceName: String) -> Data? {
+        var query = baseQuery(account: account, serviceOverride: serviceName)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 

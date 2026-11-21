@@ -22,16 +22,15 @@ public final class AnalysisCacheStore: @unchecked Sendable {
             root = baseDirectory
         } else {
             let sharedRoot = SharedAppGroup.sharedApplicationSupportURL
-            if SharedAppGroup.containerURL != nil,
-               let legacyRoot = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            {
-                SharedAppGroup.migrateLegacyCacheDirectoryIfNeeded(from: legacyRoot, to: sharedRoot)
-            }
+            let legacyRoot = (SharedAppGroup.containerURL != nil)
+                ? (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? sharedRoot)
+                : sharedRoot
+            SharedAppGroup.migrateLegacyCacheDirectoryIfNeeded(from: legacyRoot, to: sharedRoot)
             root = sharedRoot
         }
 
         self.cacheDirectory = root
-            .appendingPathComponent("AppleMailAI", isDirectory: true)
+            .appendingPathComponent("MailKBAI", isDirectory: true)
             .appendingPathComponent("MessageCache", isDirectory: true)
 
         let enc = JSONEncoder()

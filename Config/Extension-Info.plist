@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>$(DEVELOPMENT_LANGUAGE)</string>
     <key>CFBundleDisplayName</key>
-    <string>AI 邮件汇总与双语回复</string>
+    <string>MailKB AI 汇总与双语回复</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -20,8 +20,8 @@
     <string>1.1.0</string>
     <key>CFBundleVersion</key>
     <string>2</string>
-    <key>AppleMailAIAppGroup</key>
-    <string>$(DEVELOPMENT_TEAM).com.bao3.AppleMailAI</string>
+    <key>MailKBAIAppGroup</key>
+    <string>$(DEVELOPMENT_TEAM).com.bao3.MailKBAI</string>
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
     <key>NSRemindersFullAccessUsageDescription</key>

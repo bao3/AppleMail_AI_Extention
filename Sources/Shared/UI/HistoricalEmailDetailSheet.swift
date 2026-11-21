@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// In-panel read-only reader displaying original email headers, body, attachments,
-/// and extracted price evidence snippets from `outlook.sqlite` without leaving Apple Mail's modal sheet.
+/// and extracted price evidence snippets from `mailkb.sqlite` (or legacy `outlook.sqlite`) without leaving Apple Mail's modal sheet.
 public struct HistoricalEmailDetailSheet: View {
     private let record: HistoricalPriceRecord
     private let priceService: HistoricalPriceLookupService
@@ -112,7 +112,7 @@ public struct HistoricalEmailDetailSheet: View {
             Spacer()
             ProgressView()
                 .controlSize(.small)
-            Text("正在从本地 Outlook KB 读取原邮件与报价依据…")
+            Text("正在从本地 MailKB 读取原邮件与报价依据…")
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
             Spacer()

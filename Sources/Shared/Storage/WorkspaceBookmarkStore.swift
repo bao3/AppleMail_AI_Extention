@@ -11,7 +11,7 @@ public enum WorkspaceBookmarkError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .noWorkspaceSelected:
-            return "尚未选择附件归档工作区目录，请先选择 Moxa 工作区根目录。"
+            return "尚未选择附件归档工作区目录，请先选择工作区根目录。"
         case let .invalidDirectory(url):
             return "所选工作区目录不存在或不是文件夹：\(url.path)"
         case let .bookmarkCreationFailed(reason):
@@ -24,7 +24,8 @@ public enum WorkspaceBookmarkError: LocalizedError, Equatable, Sendable {
 @MainActor
 public final class WorkspaceBookmarkStore: ObservableObject {
     public static let shared = WorkspaceBookmarkStore()
-    public static let bookmarkDefaultsKey = "com.bao3.AppleMailAI.workspaceRootBookmark"
+    public static let bookmarkDefaultsKey = "com.bao3.MailKBAI.workspaceRootBookmark"
+    public static let legacyBookmarkDefaultsKey = "com.bao3.AppleMailAI.workspaceRootBookmark"
 
     @Published public private(set) var workspaceURL: URL?
 
@@ -42,24 +43,23 @@ public final class WorkspaceBookmarkStore: ObservableObject {
         self.workspaceURL = resolvePersistedBookmark()
     }
 
-    /// Presents an `NSOpenPanel` folder picker defaulting to `~/Documents/Moxa` if present,
+    /// Presents an `NSOpenPanel` folder picker defaulting to `~/Documents` if present,
     /// and persists a security-scoped bookmark for the selected directory.
     @discardableResult
     public func chooseWorkspaceDirectory() -> URL? {
         let panel = NSOpenPanel()
         panel.title = "选择附件归档工作区根目录"
-        panel.message = "请选择要保存邮件附件的工作区目录（例如 Documents/Moxa）。仅在您点击确认后按选定目录写入。"
+        panel.message = "请选择要保存邮件附件的工作区目录（例如 Documents 下的项目归档目录）。仅在您点击确认后按选定目录写入。"
         panel.prompt = "授权此目录"
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
 
-        let defaultMoxaURL = FileManager.default.homeDirectoryForCurrentUser
+        let defaultDocumentsURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Documents", isDirectory: true)
-            .appendingPathComponent("Moxa", isDirectory: true)
-        if FileManager.default.fileExists(atPath: defaultMoxaURL.path) {
-            panel.directoryURL = defaultMoxaURL
+        if FileManager.default.fileExists(atPath: defaultDocumentsURL.path) {
+            panel.directoryURL = defaultDocumentsURL
         }
 
         guard panel.runModal() == .OK, let selectedURL = panel.url else {
@@ -112,6 +112,7 @@ public final class WorkspaceBookmarkStore: ObservableObject {
 
     public func clearWorkspace() {
         userDefaults.removeObject(forKey: Self.bookmarkDefaultsKey)
+        userDefaults.removeObject(forKey: Self.legacyBookmarkDefaultsKey)
         workspaceURL = nil
     }
 
@@ -139,7 +140,15 @@ public final class WorkspaceBookmarkStore: ObservableObject {
     // MARK: - Private
 
     private func resolvePersistedBookmark() -> URL? {
-        guard let data = userDefaults.data(forKey: Self.bookmarkDefaultsKey) else {
+        let activeKey: String
+        let data: Data
+        if let primaryData = userDefaults.data(forKey: Self.bookmarkDefaultsKey) {
+            activeKey = Self.bookmarkDefaultsKey
+            data = primaryData
+        } else if let legacyData = userDefaults.data(forKey: Self.legacyBookmarkDefaultsKey) {
+            activeKey = Self.legacyBookmarkDefaultsKey
+            data = legacyData
+        } else {
             return nil
         }
 
@@ -161,11 +170,15 @@ public final class WorkspaceBookmarkStore: ObservableObject {
             resolvedURL = plain
         } else {
             ExtensionLogger.cache.warning("Failed to resolve persisted workspace bookmark; clearing stale entry")
-            userDefaults.removeObject(forKey: Self.bookmarkDefaultsKey)
+            userDefaults.removeObject(forKey: activeKey)
             return nil
         }
 
         guard let url = resolvedURL else { return nil }
+
+        if activeKey == Self.legacyBookmarkDefaultsKey {
+            userDefaults.set(data, forKey: Self.bookmarkDefaultsKey)
+        }
 
         if isStale {
             let didStart = url.startAccessingSecurityScopedResource()

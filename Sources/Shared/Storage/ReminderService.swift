@@ -216,8 +216,9 @@ public enum ReminderScheduleCalculator {
 @MainActor
 public final class ReminderService {
     public static let shared = ReminderService()
-    public static let reminderListTitle = "Moxa 邮件待办"
-    nonisolated public static let addedKeysDefaultsKey = "com.bao3.AppleMailAI.addedReminderKeys"
+    public static let reminderListTitle = "MailKB 邮件待办"
+    nonisolated public static let addedKeysDefaultsKey = "com.bao3.MailKBAI.addedReminderKeys"
+    nonisolated public static let legacyAddedKeysDefaultsKey = "com.bao3.AppleMailAI.addedReminderKeys"
     nonisolated public static let maxStoredAddedKeys = 500
 
     private let eventStore = EKEventStore()
@@ -345,7 +346,17 @@ public final class ReminderService {
     // MARK: - Private
 
     private func storedKeysList() -> [String] {
-        SharedAppGroup.sharedUserDefaults.stringArray(forKey: Self.addedKeysDefaultsKey) ?? []
+        let primary = SharedAppGroup.sharedUserDefaults.stringArray(forKey: Self.addedKeysDefaultsKey) ?? []
+        let legacy = SharedAppGroup.sharedUserDefaults.stringArray(forKey: Self.legacyAddedKeysDefaultsKey) ?? []
+        if legacy.isEmpty {
+            return primary
+        }
+        var seen = Set<String>()
+        var merged: [String] = []
+        for item in primary + legacy where seen.insert(item).inserted {
+            merged.append(item)
+        }
+        return merged
     }
 
     private func resolveTargetReminderList() -> EKCalendar? {

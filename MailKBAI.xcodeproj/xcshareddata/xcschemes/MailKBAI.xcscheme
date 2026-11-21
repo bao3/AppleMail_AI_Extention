@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "475EE6AA49B44F83744B38A6"
-               BuildableName = "AppleMailAI.app"
-               BlueprintName = "AppleMailAI"
-               ReferencedContainer = "container:AppleMailAI.xcodeproj">
+               BlueprintIdentifier = "4D17F26CBB90635520841402"
+               BuildableName = "MailKBAI.app"
+               BlueprintName = "MailKBAI"
+               ReferencedContainer = "container:MailKBAI.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -29,10 +29,24 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "3499021BB7DB982751B16905"
-               BuildableName = "AppleMailAIBatch"
-               BlueprintName = "AppleMailAIBatch"
-               ReferencedContainer = "container:AppleMailAI.xcodeproj">
+               BlueprintIdentifier = "55758AFCF42297BD5B4E1FCD"
+               BuildableName = "MailKBAIBatch"
+               BlueprintName = "MailKBAIBatch"
+               ReferencedContainer = "container:MailKBAI.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "EBFD091EFF1A71FD133DE8F3"
+               BuildableName = "MailKBAIExtension.appex"
+               BlueprintName = "MailKBAIExtension"
+               ReferencedContainer = "container:MailKBAI.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -43,24 +57,10 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "87C29C4AB9A23DDAD61142E5"
-               BuildableName = "AppleMailAITests.xctest"
-               BlueprintName = "AppleMailAITests"
-               ReferencedContainer = "container:AppleMailAI.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "YES"
-            buildForProfiling = "YES"
-            buildForArchiving = "YES"
-            buildForAnalyzing = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "40E400E25AE8EABFB62E9876"
-               BuildableName = "MailAIExtension.appex"
-               BlueprintName = "MailAIExtension"
-               ReferencedContainer = "container:AppleMailAI.xcodeproj">
+               BlueprintIdentifier = "B2E2E8DF43429D1CE35D6460"
+               BuildableName = "MailKBAITests.xctest"
+               BlueprintName = "MailKBAITests"
+               ReferencedContainer = "container:MailKBAI.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -74,10 +74,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "475EE6AA49B44F83744B38A6"
-            BuildableName = "AppleMailAI.app"
-            BlueprintName = "AppleMailAI"
-            ReferencedContainer = "container:AppleMailAI.xcodeproj">
+            BlueprintIdentifier = "4D17F26CBB90635520841402"
+            BuildableName = "MailKBAI.app"
+            BlueprintName = "MailKBAI"
+            ReferencedContainer = "container:MailKBAI.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -86,10 +86,10 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "87C29C4AB9A23DDAD61142E5"
-               BuildableName = "AppleMailAITests.xctest"
-               BlueprintName = "AppleMailAITests"
-               ReferencedContainer = "container:AppleMailAI.xcodeproj">
+               BlueprintIdentifier = "B2E2E8DF43429D1CE35D6460"
+               BuildableName = "MailKBAITests.xctest"
+               BlueprintName = "MailKBAITests"
+               ReferencedContainer = "container:MailKBAI.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -110,10 +110,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "475EE6AA49B44F83744B38A6"
-            BuildableName = "AppleMailAI.app"
-            BlueprintName = "AppleMailAI"
-            ReferencedContainer = "container:AppleMailAI.xcodeproj">
+            BlueprintIdentifier = "4D17F26CBB90635520841402"
+            BuildableName = "MailKBAI.app"
+            BlueprintName = "MailKBAI"
+            ReferencedContainer = "container:MailKBAI.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -127,10 +127,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "475EE6AA49B44F83744B38A6"
-            BuildableName = "AppleMailAI.app"
-            BlueprintName = "AppleMailAI"
-            ReferencedContainer = "container:AppleMailAI.xcodeproj">
+            BlueprintIdentifier = "4D17F26CBB90635520841402"
+            BuildableName = "MailKBAI.app"
+            BlueprintName = "MailKBAI"
+            ReferencedContainer = "container:MailKBAI.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

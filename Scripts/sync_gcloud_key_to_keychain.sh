@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ID="${GCP_PROJECT_ID:-${1:-}}"
 KEY_UID="${GCP_API_KEY_UID:-${2:-}}"
-SERVICE="com.bao3.AppleMailAI.vertex-api-key"
+SERVICE="com.bao3.MailKBAI.vertex-api-key"
 ACCOUNT="vertex-api-key"
 
 if [[ -z "$PROJECT_ID" || -z "$KEY_UID" ]]; then
@@ -28,14 +28,14 @@ fi
 
 ACL_ARGS=(-T /usr/bin/security)
 CANDIDATES=(
-  "$REPO_ROOT/build/DerivedData/Build/Products/Release/AppleMailAI.app/Contents/MacOS/AppleMailAI"
-  "$REPO_ROOT/build/DerivedData/Build/Products/Release/AppleMailAI.app/Contents/PlugIns/MailAIExtension.appex/Contents/MacOS/MailAIExtension"
-  "$REPO_ROOT/build/DerivedData/Build/Products/Debug/AppleMailAI.app/Contents/MacOS/AppleMailAI"
-  "$REPO_ROOT/build/DerivedData/Build/Products/Debug/AppleMailAI.app/Contents/PlugIns/MailAIExtension.appex/Contents/MacOS/MailAIExtension"
-  "/Applications/AppleMailAI.app/Contents/MacOS/AppleMailAI"
-  "/Applications/AppleMailAI.app/Contents/PlugIns/MailAIExtension.appex/Contents/MacOS/MailAIExtension"
-  "$HOME/Applications/AppleMailAI.app/Contents/MacOS/AppleMailAI"
-  "$HOME/Applications/AppleMailAI.app/Contents/PlugIns/MailAIExtension.appex/Contents/MacOS/MailAIExtension"
+  "$REPO_ROOT/build/DerivedData/Build/Products/Release/MailKBAI.app/Contents/MacOS/MailKBAI"
+  "$REPO_ROOT/build/DerivedData/Build/Products/Release/MailKBAI.app/Contents/PlugIns/MailKBAIExtension.appex/Contents/MacOS/MailKBAIExtension"
+  "$REPO_ROOT/build/DerivedData/Build/Products/Debug/MailKBAI.app/Contents/MacOS/MailKBAI"
+  "$REPO_ROOT/build/DerivedData/Build/Products/Debug/MailKBAI.app/Contents/PlugIns/MailKBAIExtension.appex/Contents/MacOS/MailKBAIExtension"
+  "/Applications/MailKBAI.app/Contents/MacOS/MailKBAI"
+  "/Applications/MailKBAI.app/Contents/PlugIns/MailKBAIExtension.appex/Contents/MacOS/MailKBAIExtension"
+  "$HOME/Applications/MailKBAI.app/Contents/MacOS/MailKBAI"
+  "$HOME/Applications/MailKBAI.app/Contents/PlugIns/MailKBAIExtension.appex/Contents/MacOS/MailKBAIExtension"
 )
 
 for bin in "${CANDIDATES[@]}"; do
@@ -50,18 +50,18 @@ security delete-generic-password -s "$SERVICE" -a "$ACCOUNT" >/dev/null 2>&1 || 
 security add-generic-password \
   -s "$SERVICE" \
   -a "$ACCOUNT" \
-  -l "AppleMailAI Vertex AI API Key ($PROJECT_ID)" \
+  -l "MailKBAI Vertex AI API Key ($PROJECT_ID)" \
   -w "$KEY_VALUE" \
   "${ACL_ARGS[@]}" \
   -U
 
-defaults write com.bao3.AppleMailAI com.bao3.AppleMailAI.vertexProjectID -string "$PROJECT_ID"
-defaults write com.bao3.AppleMailAI.Extension com.bao3.AppleMailAI.vertexProjectID -string "$PROJECT_ID"
-for group_dir in "$HOME/Library/Group Containers/"*".com.bao3.AppleMailAI"; do
+defaults write com.bao3.MailKBAI com.bao3.MailKBAI.vertexProjectID -string "$PROJECT_ID"
+defaults write com.bao3.MailKBAI.Extension com.bao3.MailKBAI.vertexProjectID -string "$PROJECT_ID"
+for group_dir in "$HOME/Library/Group Containers/"*".com.bao3.MailKBAI"; do
   if [[ -d "$group_dir" ]]; then
     group_id="$(basename "$group_dir")"
     mkdir -p "$group_dir/Library/Preferences"
-    defaults write "$group_dir/Library/Preferences/$group_id.plist" com.bao3.AppleMailAI.vertexProjectID -string "$PROJECT_ID"
+    defaults write "$group_dir/Library/Preferences/$group_id.plist" com.bao3.MailKBAI.vertexProjectID -string "$PROJECT_ID"
   fi
 done
 

@@ -1,4 +1,4 @@
-name: AppleMailAI
+name: MailKBAI
 options:
   bundleIdPrefix: com.bao3
   deploymentTarget:
@@ -19,7 +19,7 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
     COMBINE_HIDPI_IMAGES: YES
 targets:
-  AppleMailAI:
+  MailKBAI:
     type: application
     platform: macOS
     sources:
@@ -27,14 +27,14 @@ targets:
       - path: Sources/HostApp
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.MailKBAI
         INFOPLIST_FILE: Config/HostApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: Config/HostApp.entitlements
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"
           - "@executable_path/../Frameworks"
     dependencies:
-      - target: MailAIExtension
+      - target: MailKBAIExtension
         embed: true
       - sdk: MailKit.framework
       - sdk: EventKit.framework
@@ -42,7 +42,7 @@ targets:
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
       - sdk: libsqlite3.tbd
-  MailAIExtension:
+  MailKBAIExtension:
     type: app-extension
     platform: macOS
     sources:
@@ -51,7 +51,7 @@ targets:
       - path: Resources/ExtensionAssets.xcassets
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI.Extension
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.MailKBAI.Extension
         INFOPLIST_FILE: Config/Extension-Info.plist
         CODE_SIGN_ENTITLEMENTS: Config/Extension.entitlements
         SKIP_INSTALL: YES
@@ -66,16 +66,16 @@ targets:
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
       - sdk: libsqlite3.tbd
-  AppleMailAITests:
+  MailKBAITests:
     type: bundle.unit-test
     platform: macOS
     sources:
       - path: Sources/Shared
       - path: Sources/MailExtension
-      - path: Tests/AppleMailAITests
+      - path: Tests/MailKBAITests
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI.Tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.MailKBAI.Tests
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
@@ -88,7 +88,7 @@ targets:
       - sdk: AppKit.framework
       - sdk: SwiftUI.framework
       - sdk: libsqlite3.tbd
-  AppleMailAIBatch:
+  MailKBAIBatch:
     type: tool
     platform: macOS
     sources:
@@ -96,7 +96,7 @@ targets:
       - path: Sources/BatchCLI
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.AppleMailAI.BatchCLI
+        PRODUCT_BUNDLE_IDENTIFIER: com.bao3.MailKBAI.BatchCLI
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""
@@ -110,20 +110,20 @@ targets:
       - sdk: SwiftUI.framework
       - sdk: libsqlite3.tbd
 schemes:
-  AppleMailAI:
+  MailKBAI:
     build:
       targets:
-        AppleMailAI: all
-        MailAIExtension: all
-        AppleMailAIBatch: all
-        AppleMailAITests: [test]
+        MailKBAI: all
+        MailKBAIExtension: all
+        MailKBAIBatch: all
+        MailKBAITests: [test]
     test:
       targets:
-        - AppleMailAITests
-  AppleMailAITests:
+        - MailKBAITests
+  MailKBAITests:
     build:
       targets:
-        AppleMailAITests: [build, test]
+        MailKBAITests: [build, test]
     test:
       targets:
-        - AppleMailAITests
+        - MailKBAITests

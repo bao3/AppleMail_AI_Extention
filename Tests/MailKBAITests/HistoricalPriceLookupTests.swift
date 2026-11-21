@@ -419,18 +419,26 @@ final class HistoricalPriceLookupTests: XCTestCase {
             plainBody: "Please provide unit price for TN-4908-4GTX-WV-CT-T."
         )
 
-        // 1. Direct path containing ".moxa-kb" (inside temporaryDirectory) must be refused without coldDBURL.
-        let fakeSyncDir = tempDir.appendingPathComponent(".moxa-kb", isDirectory: true)
-        try FileManager.default.createDirectory(at: fakeSyncDir, withIntermediateDirectories: true)
-        let fakeSyncDB = fakeSyncDir.appendingPathComponent("outlook.sqlite")
-        try FileManager.default.copyItem(at: dbURL, to: fakeSyncDB)
+        // 1. Direct path containing ".moxa-kb", ".mailkb", or ".mailkb_db" (inside temporaryDirectory) must be refused without coldDBURL.
+        for hiddenFolder in [".moxa-kb", ".mailkb", ".mailkb_db"] {
+            let fakeSyncDir = tempDir.appendingPathComponent(hiddenFolder, isDirectory: true)
+            try FileManager.default.createDirectory(at: fakeSyncDir, withIntermediateDirectories: true)
+            let dbFilename: String
+            switch hiddenFolder {
+            case ".mailkb_db": dbFilename = "mailkb_db.sqlite"
+            case ".mailkb": dbFilename = "mailkb.sqlite"
+            default: dbFilename = "outlook.sqlite"
+            }
+            let fakeSyncDB = fakeSyncDir.appendingPathComponent(dbFilename)
+            try FileManager.default.copyItem(at: dbURL, to: fakeSyncDB)
 
-        let blockedDirect = await service.lookupRelatedPrices(
-            for: email,
-            runtimeDBPath: fakeSyncDB.path,
-            coldDBURL: nil
-        )
-        XCTAssertTrue(blockedDirect.isEmpty)
+            let blockedDirect = await service.lookupRelatedPrices(
+                for: email,
+                runtimeDBPath: fakeSyncDB.path,
+                coldDBURL: nil
+            )
+            XCTAssertTrue(blockedDirect.isEmpty, "Expected direct cold DB open inside \(hiddenFolder) to be blocked")
+        }
 
         // 2. Non-SQLite file as coldDBURL must be rejected without staging anything.
         let invalidColdURL = tempDir.appendingPathComponent("invalid.sqlite")
@@ -443,10 +451,10 @@ final class HistoricalPriceLookupTests: XCTestCase {
             coldDBURL: invalidColdURL
         )
         XCTAssertTrue(invalidColdResult.isEmpty)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingDir.appendingPathComponent("outlook.sqlite").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagingDir.appendingPathComponent("mailkb_db.sqlite").path))
 
         // 3. Symlink as coldDBURL must be rejected via O_RDONLY | O_NOFOLLOW.
-        let symlinkColdURL = tempDir.appendingPathComponent("symlink-outlook.sqlite")
+        let symlinkColdURL = tempDir.appendingPathComponent("symlink-mailkb_db.sqlite")
         try FileManager.default.createSymbolicLink(at: symlinkColdURL, withDestinationURL: dbURL)
         let symlinkResult = await service.lookupRelatedPrices(
             for: email,
@@ -455,20 +463,71 @@ final class HistoricalPriceLookupTests: XCTestCase {
         )
         XCTAssertTrue(symlinkResult.isEmpty)
 
-        // 4. Valid coldDBURL stages safely into stagingDir/outlook.sqlite and serves results.
+        // 4. Valid coldDBURL stages safely into stagingDir/mailkb_db.sqlite and serves results.
         let coldResult = await service.lookupRelatedPrices(
             for: email,
             runtimeDBPath: missingRuntime,
             coldDBURL: dbURL
         )
         XCTAssertEqual(coldResult.count, 1)
-        let stagedFile = stagingDir.appendingPathComponent("outlook.sqlite")
+        let stagedFile = stagingDir.appendingPathComponent("mailkb_db.sqlite")
         XCTAssertTrue(FileManager.default.fileExists(atPath: stagedFile.path))
         let record = try XCTUnwrap(coldResult.first?.records.first)
         XCTAssertEqual(record.currency, "USD")
         XCTAssertEqual(record.unitPrice, 920.0, accuracy: 0.001)
         XCTAssertEqual(record.priceTypeLabel, "特价支持")
         XCTAssertEqual(record.mailJumpURL, URL(string: "message://%3Ccold-fallback-1@moxa.com%3E"))
+    }
+
+    func testRuntimeDBResolutionPrefersMailKBDBThenMailKBThenOutlookSQLite() throws {
+        let fakeHome = tempDir.appendingPathComponent("fake-home", isDirectory: true)
+        let mailkbDBDir = fakeHome.appendingPathComponent(".cache/mailkb_db", isDirectory: true)
+        let mailkbDir = fakeHome.appendingPathComponent(".cache/mailkb", isDirectory: true)
+        let legacyDir = fakeHome.appendingPathComponent(".cache/moxa-kb-runtime", isDirectory: true)
+        try FileManager.default.createDirectory(at: mailkbDBDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mailkbDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacyDir, withIntermediateDirectories: true)
+
+        try buildMockOutlookDatabase(at: dbURL) { _ in }
+        let mailkbDBFile = mailkbDBDir.appendingPathComponent("mailkb_db.sqlite")
+        let mailkbFile = mailkbDir.appendingPathComponent("mailkb.sqlite")
+        let legacyFile = legacyDir.appendingPathComponent("outlook.sqlite")
+        try FileManager.default.copyItem(at: dbURL, to: legacyFile)
+
+        // 1. Only legacy outlook.sqlite exists -> falls back cleanly
+        let fallbackResolved = HistoricalPriceLookupService.resolveReadableRuntimeDBPath(
+            explicitRuntimeDBPath: nil,
+            coldDBURL: nil,
+            stagingDirectoryURL: stagingDir,
+            environment: [:],
+            containerHomeDirectory: fakeHome,
+            realHomeDirectory: nil
+        )
+        XCTAssertEqual(fallbackResolved, legacyFile.standardizedFileURL.path)
+
+        // 2. Both mailkb.sqlite and outlook.sqlite exist -> prefers mailkb.sqlite
+        try FileManager.default.copyItem(at: dbURL, to: mailkbFile)
+        let mailkbPreferred = HistoricalPriceLookupService.resolveReadableRuntimeDBPath(
+            explicitRuntimeDBPath: nil,
+            coldDBURL: nil,
+            stagingDirectoryURL: stagingDir,
+            environment: [:],
+            containerHomeDirectory: fakeHome,
+            realHomeDirectory: nil
+        )
+        XCTAssertEqual(mailkbPreferred, mailkbFile.standardizedFileURL.path)
+
+        // 3. mailkb_db.sqlite also exists -> prefers mailkb_db.sqlite above all
+        try FileManager.default.copyItem(at: dbURL, to: mailkbDBFile)
+        let mailkbDBPreferred = HistoricalPriceLookupService.resolveReadableRuntimeDBPath(
+            explicitRuntimeDBPath: nil,
+            coldDBURL: nil,
+            stagingDirectoryURL: stagingDir,
+            environment: [:],
+            containerHomeDirectory: fakeHome,
+            realHomeDirectory: nil
+        )
+        XCTAssertEqual(mailkbDBPreferred, mailkbDBFile.standardizedFileURL.path)
     }
 
     func testDeduplicatesWeeklyBillingAndSparseAnonymousRowsAcrossDates() async throws {
@@ -852,7 +911,7 @@ final class HistoricalPriceLookupTests: XCTestCase {
                 subject: "Re: 2026 第四季度 Q4 FEP 数量统计",
                 threadTopic: "2026 第四季度 Q4 FEP 数量统计",
                 sender: "zhang@jxtd.com",
-                recipients: "baoshan.wang@moxa.com",
+                recipients: "alex.chen@acme.example",
                 dateISO: "2026-11-13",
                 projectName: "",
                 customerOrg: "北京佳信通达",
@@ -913,7 +972,7 @@ final class HistoricalPriceLookupTests: XCTestCase {
                 subject: "回复：2026 第四季度 Q4 FEP 数量统计",
                 threadTopic: "2026 第四季度 Q4 FEP 数量统计",
                 sender: "li@windit.com",
-                recipients: "baoshan.wang@moxa.com",
+                recipients: "alex.chen@acme.example",
                 dateISO: "2026-10-30",
                 projectName: "",
                 customerOrg: "浙江中自庆安 (WindIT)",
@@ -1036,7 +1095,7 @@ final class HistoricalPriceLookupTests: XCTestCase {
             messageID: messageID,
             subject: subject,
             from: "partner@example.com",
-            to: ["baoshan.wang@moxa.com"],
+            to: ["alex.chen@acme.example"],
             cc: [],
             dateString: "Fri, 20 Nov 2026 10:00:00 +0800",
             inReplyTo: nil,

@@ -287,10 +287,13 @@ public final class AIProviderStore: @unchecked Sendable {
         enableDistributedSync: SharedAppGroup.isUsingSharedGroup
     )
 
-    public static let profilesDefaultsKey = "com.bao3.AppleMailAI.aiProviderProfiles.v1"
-    public static let activeProfileIDDefaultsKey = "com.bao3.AppleMailAI.activeProviderProfileID.v1"
-    public static let preferredTierDefaultsKey = "com.bao3.AppleMailAI.preferredModelTier.v1"
-    public static let didChangeNotification = Notification.Name("com.bao3.AppleMailAI.AIProviderStoreDidChange")
+    public static let profilesDefaultsKey = "com.bao3.MailKBAI.aiProviderProfiles.v1"
+    public static let legacyProfilesDefaultsKey = "com.bao3.AppleMailAI.aiProviderProfiles.v1"
+    public static let activeProfileIDDefaultsKey = "com.bao3.MailKBAI.activeProviderProfileID.v1"
+    public static let legacyActiveProfileIDDefaultsKey = "com.bao3.AppleMailAI.activeProviderProfileID.v1"
+    public static let preferredTierDefaultsKey = "com.bao3.MailKBAI.preferredModelTier.v1"
+    public static let legacyPreferredTierDefaultsKey = "com.bao3.AppleMailAI.preferredModelTier.v1"
+    public static let didChangeNotification = Notification.Name("com.bao3.MailKBAI.AIProviderStoreDidChange")
 
     private let userDefaults: UserDefaults
     private let keychainStore: KeychainStore
@@ -509,6 +512,33 @@ public final class AIProviderStore: @unchecked Sendable {
             } else {
                 _preferredTier = AIModelTier(legacyModel: keychainStore.loadPreferredModel())
             }
+            return
+        }
+
+        // Migrate from AppleMailAI v1.1 settings
+        if let legacyData = userDefaults.data(forKey: Self.legacyProfilesDefaultsKey),
+           let decoded = try? decoder.decode([AIProviderProfile].self, from: legacyData),
+           !decoded.isEmpty
+        {
+            _profiles = decoded
+            let storedActive = userDefaults.string(forKey: Self.activeProfileIDDefaultsKey)
+                ?? userDefaults.string(forKey: Self.legacyActiveProfileIDDefaultsKey)
+                ?? ""
+            if decoded.contains(where: { $0.id == storedActive }) {
+                _activeProfileID = storedActive
+            } else {
+                _activeProfileID = decoded[0].id
+            }
+
+            if let tierRaw = userDefaults.string(forKey: Self.preferredTierDefaultsKey)
+                ?? userDefaults.string(forKey: Self.legacyPreferredTierDefaultsKey),
+               let tier = AIModelTier(rawValue: tierRaw)
+            {
+                _preferredTier = tier
+            } else {
+                _preferredTier = AIModelTier(legacyModel: keychainStore.loadPreferredModel())
+            }
+            persistLocked()
             return
         }
 

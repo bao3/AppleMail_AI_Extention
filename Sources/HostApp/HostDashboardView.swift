@@ -394,9 +394,9 @@ struct HostDashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Apple Mail AI 扩展控制台")
+                    Text("MailKB AI 控制台")
                         .font(.title2.bold())
-                    Text("MailKit 原生扩展：阅读顶部横幅「AI 汇总分析」（SSE 流式呈现 + 历史报价参考 + 附件智能归档）+ 写信工具栏「AI 双语回复助手」。邮件原文透传不加密、不篡改。")
+                    Text("面向 Apple Mail 的原生 MailKit 扩展：阅读顶部横幅「AI 汇总分析」（SSE 流式呈现 + MailKB 历史报价参考 + 附件智能归档）+ 写信工具栏「AI 双语回复助手」。邮件原文透传不加密、不篡改。")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -413,7 +413,7 @@ struct HostDashboardView: View {
                 GroupBox("如何在 Apple Mail 中启用扩展") {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("1. 打开系统 **邮件 (Mail.app)** → 菜单栏 **邮件 → 设置… (⌘,)** → **扩展**。")
-                        Text("2. 在左侧勾选启用 **AI 邮件汇总与双语回复**。")
+                        Text("2. 在左侧勾选启用 **MailKB AI 汇总与双语回复**。")
                         Text("3. 点开任意邮件，顶部横幅即显示「**AI 汇总分析**」按钮；点写信窗口工具栏扩展图标即可使用双语回复草稿。")
                         Text("4. 支持 **Vertex AI / Gemini API Studio / OpenAI 兼容接口 / Anthropic Claude**，API Key 仅由 macOS Keychain 读取；附件归档仅在授权工作区目录并点击确认后写入，绝不覆盖现有文件。")
                     }

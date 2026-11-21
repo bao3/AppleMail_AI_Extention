@@ -2,17 +2,18 @@ import Foundation
 import Security
 
 /// Coordinates shared preferences, cached analyses, and cross-process change notifications
-/// between the sandboxed Host App (`AppleMailAI.app`) and MailKit Extension (`MailAIExtension.appex`)
+/// between the sandboxed Host App (`MailKBAI.app`) and MailKit Extension (`MailKBAIExtension.appex`)
 /// using a Team-ID-prefixed macOS App Group container.
 public enum SharedAppGroup {
-    public static let groupSuffix = "com.bao3.AppleMailAI"
-    public static let migrationMarkerKey = "com.bao3.AppleMailAI.migratedToAppGroup.v1"
-    public static let distributedConfigDidChangeNotification = Notification.Name("com.bao3.AppleMailAI.sharedConfigDidChange")
+    public static let groupSuffix = "com.bao3.MailKBAI"
+    public static let legacyGroupSuffix = "com.bao3.AppleMailAI"
+    public static let migrationMarkerKey = "com.bao3.MailKBAI.migratedToAppGroup.v1"
+    public static let distributedConfigDidChangeNotification = Notification.Name("com.bao3.MailKBAI.sharedConfigDidChange")
 
-    private static let cacheMigrationMarkerFilename = ".migrated-to-app-group"
+    private static let cacheMigrationMarkerFilename = ".migrated-to-app-group-v2"
 
     /// Resolves the active App Group identifier from the running binary's signed entitlements
-    /// (falling back to `AppleMailAIAppGroup` in `Info.plist`), verifying that macOS resolves
+    /// (falling back to `MailKBAIAppGroup` / legacy `AppleMailAIAppGroup` in `Info.plist`), verifying that macOS resolves
     /// a real group container URL. Returns `nil` for unsigned/ad-hoc test & CLI binaries.
     public static let resolvedGroupIdentifier: String? = {
         let candidate = readGroupIdentifierFromSignedEntitlements() ?? readGroupIdentifierFromInfoPlist()
@@ -82,34 +83,49 @@ public enum SharedAppGroup {
         let encoder = JSONEncoder()
 
         let legacyProfiles: [AIProviderProfile] = {
-            guard let data = legacy.data(forKey: AIProviderStore.profilesDefaultsKey),
-                  let decoded = try? decoder.decode([AIProviderProfile].self, from: data)
-            else {
-                return []
+            if let data = legacy.data(forKey: AIProviderStore.profilesDefaultsKey),
+               let decoded = try? decoder.decode([AIProviderProfile].self, from: data)
+            {
+                return decoded
             }
-            return decoded
+            if let data = legacy.data(forKey: AIProviderStore.legacyProfilesDefaultsKey),
+               let decoded = try? decoder.decode([AIProviderProfile].self, from: data)
+            {
+                return decoded
+            }
+            return []
         }()
 
         let sharedProfiles: [AIProviderProfile] = {
-            guard let data = shared.data(forKey: AIProviderStore.profilesDefaultsKey),
-                  let decoded = try? decoder.decode([AIProviderProfile].self, from: data)
-            else {
-                return []
+            if let data = shared.data(forKey: AIProviderStore.profilesDefaultsKey),
+               let decoded = try? decoder.decode([AIProviderProfile].self, from: data)
+            {
+                return decoded
             }
-            return decoded
+            if let data = shared.data(forKey: AIProviderStore.legacyProfilesDefaultsKey),
+               let decoded = try? decoder.decode([AIProviderProfile].self, from: data)
+            {
+                return decoded
+            }
+            return []
         }()
+
+        let legacyActiveValue = legacy.string(forKey: AIProviderStore.activeProfileIDDefaultsKey)
+            ?? legacy.string(forKey: AIProviderStore.legacyActiveProfileIDDefaultsKey)
+        let legacyTierValue = legacy.string(forKey: AIProviderStore.preferredTierDefaultsKey)
+            ?? legacy.string(forKey: AIProviderStore.legacyPreferredTierDefaultsKey)
 
         if !legacyProfiles.isEmpty {
             if sharedProfiles.isEmpty {
                 if let encoded = try? encoder.encode(legacyProfiles) {
                     shared.set(encoded, forKey: AIProviderStore.profilesDefaultsKey)
                 }
-                if let legacyActive = legacy.string(forKey: AIProviderStore.activeProfileIDDefaultsKey),
+                if let legacyActive = legacyActiveValue,
                    !legacyActive.isEmpty
                 {
                     shared.set(legacyActive, forKey: AIProviderStore.activeProfileIDDefaultsKey)
                 }
-                if let legacyTier = legacy.string(forKey: AIProviderStore.preferredTierDefaultsKey),
+                if let legacyTier = legacyTierValue,
                    !legacyTier.isEmpty
                 {
                     shared.set(legacyTier, forKey: AIProviderStore.preferredTierDefaultsKey)
@@ -129,8 +145,10 @@ public enum SharedAppGroup {
                     shared.set(encoded, forKey: AIProviderStore.profilesDefaultsKey)
                 }
 
-                let sharedActive = shared.string(forKey: AIProviderStore.activeProfileIDDefaultsKey) ?? ""
-                let legacyActive = legacy.string(forKey: AIProviderStore.activeProfileIDDefaultsKey) ?? ""
+                let sharedActive = shared.string(forKey: AIProviderStore.activeProfileIDDefaultsKey)
+                    ?? shared.string(forKey: AIProviderStore.legacyActiveProfileIDDefaultsKey)
+                    ?? ""
+                let legacyActive = legacyActiveValue ?? ""
                 if (sharedActive.isEmpty || sharedActive == AIProviderProfile.defaultVertexProfileID),
                    !legacyActive.isEmpty,
                    legacyActive != AIProviderProfile.defaultVertexProfileID,
@@ -145,7 +163,7 @@ public enum SharedAppGroup {
                 }
 
                 if shared.string(forKey: AIProviderStore.preferredTierDefaultsKey) == nil,
-                   let legacyTier = legacy.string(forKey: AIProviderStore.preferredTierDefaultsKey),
+                   let legacyTier = legacyTierValue,
                    !legacyTier.isEmpty
                 {
                     shared.set(legacyTier, forKey: AIProviderStore.preferredTierDefaultsKey)
@@ -157,7 +175,8 @@ public enum SharedAppGroup {
         let sharedProjectID = (shared.string(forKey: KeychainStore.userDefaultsProjectIDKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if sharedProjectID.isEmpty,
-           let legacyProjectID = legacy.string(forKey: KeychainStore.userDefaultsProjectIDKey)?
+           let legacyProjectID = (legacy.string(forKey: KeychainStore.userDefaultsProjectIDKey)
+               ?? legacy.string(forKey: KeychainStore.legacyUserDefaultsProjectIDKey))?
                .trimmingCharacters(in: .whitespacesAndNewlines),
            !legacyProjectID.isEmpty
         {
@@ -167,7 +186,8 @@ public enum SharedAppGroup {
         let sharedModel = (shared.string(forKey: KeychainStore.userDefaultsModelKey) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if sharedModel.isEmpty,
-           let legacyModel = legacy.string(forKey: KeychainStore.userDefaultsModelKey)?
+           let legacyModel = (legacy.string(forKey: KeychainStore.userDefaultsModelKey)
+               ?? legacy.string(forKey: KeychainStore.legacyUserDefaultsModelKey))?
                .trimmingCharacters(in: .whitespacesAndNewlines),
            !legacyModel.isEmpty
         {
@@ -175,20 +195,30 @@ public enum SharedAppGroup {
         }
 
         // Migrate ExtensionOpsConfig flags if unset in shared suite
-        let opsBoolKeys = [
-            ExtensionOpsConfig.disableSecurityBannerKey,
-            ExtensionOpsConfig.autoAnalyzeMoxaPrimaryKey,
-            ExtensionOpsConfig.autoFlagMoxaPrimaryKey
+        let opsBoolKeyPairs: [(newKey: String, legacyKey: String)] = [
+            (ExtensionOpsConfig.disableSecurityBannerKey, ExtensionOpsConfig.legacyDisableSecurityBannerKey),
+            (ExtensionOpsConfig.autoAnalyzePrimaryKey, ExtensionOpsConfig.legacyAutoAnalyzeMoxaPrimaryKey),
+            (ExtensionOpsConfig.autoFlagPrimaryKey, ExtensionOpsConfig.legacyAutoFlagMoxaPrimaryKey)
         ]
-        for key in opsBoolKeys {
-            if shared.object(forKey: key) == nil, legacy.object(forKey: key) != nil {
-                shared.set(legacy.bool(forKey: key), forKey: key)
+        for pair in opsBoolKeyPairs where shared.object(forKey: pair.newKey) == nil {
+            if legacy.object(forKey: pair.newKey) != nil {
+                shared.set(legacy.bool(forKey: pair.newKey), forKey: pair.newKey)
+            } else if legacy.object(forKey: pair.legacyKey) != nil {
+                shared.set(legacy.bool(forKey: pair.legacyKey), forKey: pair.newKey)
             }
+        }
+
+        // Migrate PrimaryMailFilter scope if unset in shared suite
+        if shared.data(forKey: PrimaryMailFilter.scopeDefaultsKey) == nil,
+           let scopeData = legacy.data(forKey: PrimaryMailFilter.scopeDefaultsKey)
+        {
+            shared.set(scopeData, forKey: PrimaryMailFilter.scopeDefaultsKey)
         }
 
         // Union added reminder keys without duplicates
         let existingKeys = shared.stringArray(forKey: ReminderService.addedKeysDefaultsKey) ?? []
-        let legacyKeys = legacy.stringArray(forKey: ReminderService.addedKeysDefaultsKey) ?? []
+        let legacyKeys = (legacy.stringArray(forKey: ReminderService.addedKeysDefaultsKey) ?? [])
+            + (legacy.stringArray(forKey: ReminderService.legacyAddedKeysDefaultsKey) ?? [])
         if !legacyKeys.isEmpty {
             var seen = Set<String>()
             var combined: [String] = []
@@ -206,30 +236,33 @@ public enum SharedAppGroup {
         legacy.set(true, forKey: migrationMarkerKey)
     }
 
-    /// Copies missing `.json` analysis cache files from a legacy per-container `Application Support`
-    /// folder into the shared App Group `Application Support` folder once.
+    /// Copies missing `.json` analysis cache files from legacy per-container or legacy brand
+    /// `Application Support` folders into the shared App Group `MailKBAI/MessageCache` folder once.
     public static func migrateLegacyCacheDirectoryIfNeeded(from legacyAppSupport: URL, to sharedAppSupport: URL) {
-        guard legacyAppSupport.standardizedFileURL != sharedAppSupport.standardizedFileURL else {
-            return
-        }
-
-        let legacyRoot = legacyAppSupport.appendingPathComponent("AppleMailAI", isDirectory: true)
-        let markerURL = legacyRoot.appendingPathComponent(cacheMigrationMarkerFilename, isDirectory: false)
         let fm = FileManager.default
+        let sharedRoot = sharedAppSupport.appendingPathComponent("MailKBAI", isDirectory: true)
+        let markerURL = sharedRoot.appendingPathComponent(cacheMigrationMarkerFilename, isDirectory: false)
         if fm.fileExists(atPath: markerURL.path) {
             return
         }
 
-        let legacyCacheDir = legacyRoot.appendingPathComponent("MessageCache", isDirectory: true)
-        let sharedCacheDir = sharedAppSupport
-            .appendingPathComponent("AppleMailAI", isDirectory: true)
-            .appendingPathComponent("MessageCache", isDirectory: true)
+        let sharedCacheDir = sharedRoot.appendingPathComponent("MessageCache", isDirectory: true)
+        var sourceCacheDirs: [URL] = [
+            sharedAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
+        ]
+        if legacyAppSupport.standardizedFileURL != sharedAppSupport.standardizedFileURL {
+            sourceCacheDirs.append(legacyAppSupport.appendingPathComponent("MailKBAI/MessageCache", isDirectory: true))
+            sourceCacheDirs.append(legacyAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true))
+        }
 
-        var isDir: ObjCBool = false
-        if fm.fileExists(atPath: legacyCacheDir.path, isDirectory: &isDir), isDir.boolValue {
+        for sourceCacheDir in sourceCacheDirs {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: sourceCacheDir.path, isDirectory: &isDir), isDir.boolValue else {
+                continue
+            }
             try? fm.createDirectory(at: sharedCacheDir, withIntermediateDirectories: true)
             if let files = try? fm.contentsOfDirectory(
-                at: legacyCacheDir,
+                at: sourceCacheDir,
                 includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles]
             ) {
@@ -242,7 +275,7 @@ public enum SharedAppGroup {
             }
         }
 
-        try? fm.createDirectory(at: legacyRoot, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: sharedRoot, withIntermediateDirectories: true)
         fm.createFile(atPath: markerURL.path, contents: Data("1\n".utf8))
     }
 
@@ -315,10 +348,14 @@ public enum SharedAppGroup {
     }
 
     private static func readGroupIdentifierFromInfoPlist() -> String? {
-        guard let raw = Bundle.main.object(forInfoDictionaryKey: "AppleMailAIAppGroup") as? String else {
-            return nil
+        for key in ["MailKBAIAppGroup", "AppleMailAIAppGroup"] {
+            if let raw = Bundle.main.object(forInfoDictionaryKey: key) as? String {
+                let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if isValidGroupIdentifier(trimmed) {
+                    return trimmed
+                }
+            }
         }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return isValidGroupIdentifier(trimmed) ? trimmed : nil
+        return nil
     }
 }

@@ -77,7 +77,7 @@ final class MultiProviderAndStreamingTests: XCTestCase {
     }
 
     private func makeIsolatedDefaults() -> (UserDefaults, String) {
-        let suite = "com.bao3.AppleMailAI.tests.\(UUID().uuidString)"
+        let suite = "com.bao3.MailKBAI.tests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         return (defaults, suite)
@@ -215,7 +215,7 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         let (defaults, suite) = makeIsolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        let testService = "com.bao3.AppleMailAI.keychain-test.\(UUID().uuidString)"
+        let testService = "com.bao3.MailKBAI.keychain-test.\(UUID().uuidString)"
         let keychain = KeychainStore(service: testService, userDefaults: defaults)
         defer {
             try? keychain.deleteAPIKey(forProfileID: AIProviderProfile.defaultVertexProfileID)
@@ -251,6 +251,20 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         try keychain.deleteAPIKey(forProfileID: "openai-work")
         XCTAssertFalse(keychain.hasAPIKey(forProfileID: "openai-work"))
         XCTAssertTrue(keychain.hasAPIKey())
+
+        // Legacy fallbackService reads legacy key when primary service has none, without shadowing primary writes
+        let legacyService = "com.bao3.AppleMailAI.legacy-test.\(UUID().uuidString)"
+        let primaryService = "com.bao3.MailKBAI.primary-test.\(UUID().uuidString)"
+        let legacyWriter = KeychainStore(service: legacyService, userDefaults: defaults)
+        let migratingReader = KeychainStore(service: primaryService, userDefaults: defaults, fallbackService: legacyService)
+        defer {
+            try? legacyWriter.deleteAPIKey(forProfileID: "openai-fallback")
+            try? migratingReader.deleteAPIKey(forProfileID: "openai-fallback")
+        }
+        try legacyWriter.saveAPIKey("sk-legacy-9999", forProfileID: "openai-fallback")
+        XCTAssertEqual(migratingReader.loadAPIKey(forProfileID: "openai-fallback"), "sk-legacy-9999")
+        try migratingReader.saveAPIKey("sk-new-1111", forProfileID: "openai-fallback")
+        XCTAssertEqual(migratingReader.loadAPIKey(forProfileID: "openai-fallback"), "sk-new-1111")
     }
 
     // MARK: - AIServiceClient Multi-Provider Streaming & Fallback
@@ -391,14 +405,14 @@ final class MultiProviderAndStreamingTests: XCTestCase {
             baseURL: "https://openrouter.ai/api/v1",
             fastModel: "openai/gpt-4o-mini",
             deepModel: "openai/gpt-4o",
-            customHeaders: ["X-Title": "AppleMailAI"]
+            customHeaders: ["X-Title": "MailKBAI"]
         )
 
         // 1. Streaming SSE
         StreamingMockURLProtocol.setHandler { request in
             XCTAssertEqual(request.url?.absoluteString, "https://openrouter.ai/api/v1/chat/completions")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-or-test")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Title"), "AppleMailAI")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "X-Title"), "MailKBAI")
 
             let reqJSON = Self.requestBodyJSON(request)
             XCTAssertEqual(reqJSON?["stream"] as? Bool, true)
@@ -543,7 +557,7 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         XCTAssertEqual(draft.keyPointsCovered, ["提供 PDF 文档"])
 
         // 3. generateJSONText using Keychain key & active profile
-        let testService = "com.bao3.AppleMailAI.json-text-test.\(UUID().uuidString)"
+        let testService = "com.bao3.MailKBAI.json-text-test.\(UUID().uuidString)"
         let testKeychain = KeychainStore(service: testService, userDefaults: defaults)
         try testKeychain.saveAPIKey("sk-ant-kc", forProfileID: "claude-prod")
         defer { try? testKeychain.deleteAPIKey(forProfileID: "claude-prod") }
@@ -612,7 +626,7 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let testService = "com.bao3.AppleMailAI.bg-test.\(UUID().uuidString)"
+        let testService = "com.bao3.MailKBAI.bg-test.\(UUID().uuidString)"
         let keychain = KeychainStore(service: testService, userDefaults: defaults)
         try keychain.saveAPIKey("sk-bg-test", forProfileID: "openai-bg")
         defer { try? keychain.deleteAPIKey(forProfileID: "openai-bg") }
@@ -652,7 +666,7 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         let (defaults, suite) = makeIsolatedDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
 
-        let testService = "com.bao3.AppleMailAI.settings-vm-test.\(UUID().uuidString)"
+        let testService = "com.bao3.MailKBAI.settings-vm-test.\(UUID().uuidString)"
         let keychain = KeychainStore(service: testService, userDefaults: defaults)
         try keychain.saveAPIKey("sk-openai-12345678", forProfileID: "preset-openai")
         defer {
@@ -691,11 +705,11 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         let client = AIServiceClient(session: makeMockSession(), providerStore: AIProviderStore(userDefaults: defaults))
-        let magpieProfile = AIProviderProfile(
-            id: "magpie-test",
-            name: "Magpie",
+        let localGatewayProfile = AIProviderProfile(
+            id: "local-gateway-test",
+            name: "LocalGateway",
             kind: .openAICompatible,
-            baseURL: "http://192.168.50.60:3425/v1",
+            baseURL: "http://127.0.0.1:11434/v1",
             fastModel: "group/smart-split",
             deepModel: "google-vertex/gemini-4-hydrogen"
         )
@@ -726,9 +740,9 @@ final class MultiProviderAndStreamingTests: XCTestCase {
 
         let result = try await client.analyzeEmail(
             makeSampleEmail(),
-            profile: magpieProfile,
+            profile: localGatewayProfile,
             tier: .fast,
-            apiKeyOverride: "sk-magpie-test"
+            apiKeyOverride: "sk-local-test"
         )
         XCTAssertEqual(result.todos.first?.deadline, "1125")
         XCTAssertNil(result.todos.first?.dueDateISO)
@@ -824,7 +838,7 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         XCTAssertTrue(box.value)
     }
 
-    func testSharedAppGroupLegacyMigrationMergesHostAndExtensionWithoutLosingMagpie() throws {
+    func testSharedAppGroupLegacyMigrationMergesHostAndExtensionWithoutLosingProviders() throws {
         let (hostLegacy, hostSuite) = makeIsolatedDefaults()
         let (extLegacy, extSuite) = makeIsolatedDefaults()
         let (sharedGroup, sharedSuite) = makeIsolatedDefaults()
@@ -836,41 +850,41 @@ final class MultiProviderAndStreamingTests: XCTestCase {
 
         let encoder = JSONEncoder()
         let hostVertex = AIProviderProfile.defaultVertexProfile(projectID: "")
-        hostLegacy.set(try encoder.encode([hostVertex]), forKey: AIProviderStore.profilesDefaultsKey)
-        hostLegacy.set(AIProviderProfile.defaultVertexProfileID, forKey: AIProviderStore.activeProfileIDDefaultsKey)
+        hostLegacy.set(try encoder.encode([hostVertex]), forKey: AIProviderStore.legacyProfilesDefaultsKey)
+        hostLegacy.set(AIProviderProfile.defaultVertexProfileID, forKey: AIProviderStore.legacyActiveProfileIDDefaultsKey)
 
         let extVertex = AIProviderProfile.defaultVertexProfile(projectID: "gen-lang-client-test")
-        let magpieProfile = AIProviderProfile(
-            id: "magpie-profile-id",
-            name: "Magpie",
+        let localProfile = AIProviderProfile(
+            id: "local-profile-id",
+            name: "LocalGateway",
             kind: .openAICompatible,
-            baseURL: "http://192.168.50.60:3425/v1",
+            baseURL: "http://127.0.0.1:11434/v1",
             fastModel: "group/smart-split",
             deepModel: "google-vertex/gemini-4-hydrogen"
         )
-        extLegacy.set(try encoder.encode([extVertex, magpieProfile]), forKey: AIProviderStore.profilesDefaultsKey)
-        extLegacy.set(magpieProfile.id, forKey: AIProviderStore.activeProfileIDDefaultsKey)
-        extLegacy.set("gen-lang-client-test", forKey: KeychainStore.userDefaultsProjectIDKey)
-        extLegacy.set(["k1", "k2"], forKey: ReminderService.addedKeysDefaultsKey)
-        extLegacy.set(false, forKey: ExtensionOpsConfig.autoFlagMoxaPrimaryKey)
+        extLegacy.set(try encoder.encode([extVertex, localProfile]), forKey: AIProviderStore.legacyProfilesDefaultsKey)
+        extLegacy.set(localProfile.id, forKey: AIProviderStore.legacyActiveProfileIDDefaultsKey)
+        extLegacy.set("gen-lang-client-test", forKey: KeychainStore.legacyUserDefaultsProjectIDKey)
+        extLegacy.set(["k1", "k2"], forKey: ReminderService.legacyAddedKeysDefaultsKey)
+        extLegacy.set(false, forKey: ExtensionOpsConfig.legacyAutoFlagMoxaPrimaryKey)
 
         SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: hostLegacy, to: sharedGroup)
         SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: extLegacy, to: sharedGroup)
 
         let store = AIProviderStore(userDefaults: sharedGroup)
         XCTAssertEqual(store.profiles.count, 2)
-        XCTAssertEqual(store.activeProfile.id, magpieProfile.id)
-        XCTAssertEqual(store.activeProfile.name, "Magpie")
+        XCTAssertEqual(store.activeProfile.id, localProfile.id)
+        XCTAssertEqual(store.activeProfile.name, "LocalGateway")
         XCTAssertEqual(store.profile(forID: AIProviderProfile.defaultVertexProfileID)?.projectID, "gen-lang-client-test")
         XCTAssertEqual(sharedGroup.stringArray(forKey: ReminderService.addedKeysDefaultsKey), ["k1", "k2"])
-        XCTAssertEqual(sharedGroup.object(forKey: ExtensionOpsConfig.autoFlagMoxaPrimaryKey) as? Bool, false)
+        XCTAssertEqual(sharedGroup.object(forKey: ExtensionOpsConfig.autoFlagPrimaryKey) as? Bool, false)
 
         // Verify idempotency when re-run
         SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: hostLegacy, to: sharedGroup)
         SharedAppGroup.migrateLegacyDefaultsIfNeeded(from: extLegacy, to: sharedGroup)
         let storeReloaded = AIProviderStore(userDefaults: sharedGroup)
         XCTAssertEqual(storeReloaded.profiles.count, 2)
-        XCTAssertEqual(storeReloaded.activeProfile.id, magpieProfile.id)
+        XCTAssertEqual(storeReloaded.activeProfile.id, localProfile.id)
     }
 
     func testSharedAppGroupLegacyCacheMigrationCopiesMissingFilesNonDestructively() throws {
@@ -880,23 +894,33 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         let sharedAppSupport = tempRoot.appendingPathComponent("SharedSupport", isDirectory: true)
         defer { try? fm.removeItem(at: tempRoot) }
 
-        let legacyCache = legacyAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
-        let sharedCache = sharedAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
-        try fm.createDirectory(at: legacyCache, withIntermediateDirectories: true)
+        let legacyOldBrandCache = legacyAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
+        let legacyNewBrandCache = legacyAppSupport.appendingPathComponent("MailKBAI/MessageCache", isDirectory: true)
+        let sharedOldBrandCache = sharedAppSupport.appendingPathComponent("AppleMailAI/MessageCache", isDirectory: true)
+        let sharedCache = sharedAppSupport.appendingPathComponent("MailKBAI/MessageCache", isDirectory: true)
+        try fm.createDirectory(at: legacyOldBrandCache, withIntermediateDirectories: true)
+        try fm.createDirectory(at: legacyNewBrandCache, withIntermediateDirectories: true)
+        try fm.createDirectory(at: sharedOldBrandCache, withIntermediateDirectories: true)
         try fm.createDirectory(at: sharedCache, withIntermediateDirectories: true)
 
-        try Data("old-a".utf8).write(to: legacyCache.appendingPathComponent("a.json"))
-        try Data("from-legacy-b".utf8).write(to: legacyCache.appendingPathComponent("b.json"))
+        try Data("old-a".utf8).write(to: legacyOldBrandCache.appendingPathComponent("a.json"))
+        try Data("from-legacy-b".utf8).write(to: legacyOldBrandCache.appendingPathComponent("b.json"))
+        try Data("from-new-c".utf8).write(to: legacyNewBrandCache.appendingPathComponent("c.json"))
+        try Data("from-shared-old-d".utf8).write(to: sharedOldBrandCache.appendingPathComponent("d.json"))
         try Data("new-a".utf8).write(to: sharedCache.appendingPathComponent("a.json"))
 
         SharedAppGroup.migrateLegacyCacheDirectoryIfNeeded(from: legacyAppSupport, to: sharedAppSupport)
 
         let aData = try Data(contentsOf: sharedCache.appendingPathComponent("a.json"))
         let bData = try Data(contentsOf: sharedCache.appendingPathComponent("b.json"))
+        let cData = try Data(contentsOf: sharedCache.appendingPathComponent("c.json"))
+        let dData = try Data(contentsOf: sharedCache.appendingPathComponent("d.json"))
         XCTAssertEqual(String(decoding: aData, as: UTF8.self), "new-a")
         XCTAssertEqual(String(decoding: bData, as: UTF8.self), "from-legacy-b")
+        XCTAssertEqual(String(decoding: cData, as: UTF8.self), "from-new-c")
+        XCTAssertEqual(String(decoding: dData, as: UTF8.self), "from-shared-old-d")
 
-        let markerURL = legacyAppSupport.appendingPathComponent("AppleMailAI/.migrated-to-app-group")
+        let markerURL = sharedAppSupport.appendingPathComponent("MailKBAI/.migrated-to-app-group-v2")
         XCTAssertTrue(fm.fileExists(atPath: markerURL.path))
     }
 
@@ -909,13 +933,13 @@ final class MultiProviderAndStreamingTests: XCTestCase {
         // 1. OpenAI-compatible with /chat/completions suffix stripped -> /models
         let openAIProfile = AIProviderProfile(
             id: "openai-models",
-            name: "Magpie",
+            name: "LocalGateway",
             kind: .openAICompatible,
-            baseURL: "http://192.168.50.60:3425/v1/chat/completions"
+            baseURL: "http://127.0.0.1:11434/v1/chat/completions"
         )
         StreamingMockURLProtocol.setHandler { request in
             XCTAssertEqual(request.httpMethod, "GET")
-            XCTAssertEqual(request.url?.absoluteString, "http://192.168.50.60:3425/v1/models")
+            XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:11434/v1/models")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer sk-test")
             let body: [String: Any] = [
                 "data": [

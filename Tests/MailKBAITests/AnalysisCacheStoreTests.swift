@@ -6,7 +6,7 @@ final class AnalysisCacheStoreTests: XCTestCase {
     private var store: AnalysisCacheStore!
 
     override func setUpWithError() throws {
-        tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("AppleMailAITests-\(UUID().uuidString)", isDirectory: true)
+        tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("MailKBAITests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         store = AnalysisCacheStore(baseDirectory: tempDir)
     }

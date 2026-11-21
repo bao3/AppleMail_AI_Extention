@@ -79,7 +79,7 @@ public enum AttachmentOrganizerError: LocalizedError, Equatable, Sendable {
         case let .unsafeRelativePath(path):
             return "拒绝不安全的相对路径（不允许绝对路径、空段或 `..` 跳转）：\(path)"
         case let .hiddenDirectoryForbidden(path):
-            return "安全红线拦截：禁止读取或写入隐藏目录（如 `.moxa-kb`）：\(path)"
+            return "安全红线拦截：禁止读取或写入隐藏目录（如 `.mailkb_db`）：\(path)"
         case let .symlinkEscapeDetected(path):
             return "安全红线拦截：检测到符号链接越界到工作区外部：\(path)"
         case let .missingPayload(payloadID):
@@ -92,7 +92,7 @@ public enum AttachmentOrganizerError: LocalizedError, Equatable, Sendable {
     }
 }
 
-/// Discovers Moxa/workspace folders safely, proposes attachment filing destinations,
+/// Discovers workspace folders safely, proposes attachment filing destinations,
 /// detects SHA-256 duplicates / name collisions, and writes attachments atomically without overwriting.
 public final class AttachmentOrganizerService: Sendable {
     public static let shared = AttachmentOrganizerService()
@@ -161,22 +161,22 @@ public final class AttachmentOrganizerService: Sendable {
     // MARK: - Public API
 
     /// Proposes filing destinations for extracted attachments by combining deterministic scoring
-    /// (live 2-level directory scan + optional read-only runtime `moxa_kb.sqlite` clues)
+    /// (live 2-level directory scan + optional read-only runtime workspace/MailKB SQLite clues)
     /// and optional AI refinement over the top 25 candidate folders.
     public func proposeFilingPlan(
         payloads: [ExtractedAttachmentPayload],
         email: ParsedEmailContext,
         analysis: EmailAIAnalysis?,
         workspaceRootURL: URL,
-        runtimeMoxaDBPath: String? = nil,
+        runtimeWorkspaceDBPath: String? = nil,
         aiRouter: (@Sendable (_ systemPrompt: String, _ userPrompt: String) async throws -> String)? = nil
     ) async -> [AttachmentFilingPlanItem] {
         guard !payloads.isEmpty else { return [] }
 
-        let discovery = await Task.detached(priority: .userInitiated) { [workspaceRootURL, runtimeMoxaDBPath] in
+        let discovery = await Task.detached(priority: .userInitiated) { [workspaceRootURL, runtimeWorkspaceDBPath] in
             Self.discoverCandidateFolders(
                 workspaceRootURL: workspaceRootURL,
-                runtimeMoxaDBPath: runtimeMoxaDBPath
+                runtimeWorkspaceDBPath: runtimeWorkspaceDBPath
             )
         }.value
 
@@ -430,7 +430,7 @@ public final class AttachmentOrganizerService: Sendable {
 
     private static func discoverCandidateFolders(
         workspaceRootURL: URL,
-        runtimeMoxaDBPath: String?
+        runtimeWorkspaceDBPath: String?
     ) -> [String: CandidateFolderMeta] {
         var map: [String: CandidateFolderMeta] = [:]
 
@@ -461,9 +461,9 @@ public final class AttachmentOrganizerService: Sendable {
             }
         }
 
-        // 2. Read-only immutable SQLite clues from runtime moxa_kb.sqlite (NEVER .moxa-kb directly).
-        let explicitDB = runtimeMoxaDBPath != nil
-        if let resolvedDBPath = resolveSafeRuntimeDBPath(explicitPath: runtimeMoxaDBPath) {
+        // 2. Read-only immutable SQLite clues from runtime KB (NEVER .mailkb_db / .mailkb / .moxa-kb directly).
+        let explicitDB = runtimeWorkspaceDBPath != nil
+        if let resolvedDBPath = resolveSafeRuntimeDBPath(explicitPath: runtimeWorkspaceDBPath) {
             let sqliteRecords = loadFoldersFromRuntimeSQLite(atPath: resolvedDBPath)
             for (relFolder, meta) in sqliteRecords {
                 let topDir = relFolder.split(separator: "/", maxSplits: 1).first.map(String.init) ?? relFolder
@@ -528,25 +528,52 @@ public final class AttachmentOrganizerService: Sendable {
             let expanded = (explicitPath as NSString).expandingTildeInPath
             candidates = [expanded]
         } else {
-            let homeRuntime = (NSString(string: "~/.cache/moxa-kb-runtime/moxa_kb.sqlite")).expandingTildeInPath
-            let realHomeRuntime: String? = {
+            let realHomeDir: String? = {
                 guard let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir else { return nil }
-                return URL(fileURLWithPath: String(cString: dir), isDirectory: true)
-                    .appendingPathComponent(".cache/moxa-kb-runtime/moxa_kb.sqlite", isDirectory: false)
-                    .path
+                return String(cString: dir)
             }()
-            let cachesRuntime = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
-                .first?
-                .appendingPathComponent("moxa-kb-runtime/moxa_kb.sqlite")
-                .path
-            candidates = [homeRuntime, realHomeRuntime, cachesRuntime].compactMap { $0 }
+            let cachesURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            var list: [String] = []
+            for relPath in [
+                ".cache/mailkb_db/workspace_kb.sqlite",
+                ".cache/mailkb_db/mailkb_db.sqlite",
+                ".cache/mailkb/workspace_kb.sqlite",
+                ".cache/mailkb/mailkb.sqlite",
+                ".cache/moxa-kb-runtime/moxa_kb.sqlite"
+            ] {
+                list.append((NSString(string: "~/\(relPath)")).expandingTildeInPath)
+                if let realHomeDir {
+                    list.append(
+                        URL(fileURLWithPath: realHomeDir, isDirectory: true)
+                            .appendingPathComponent(relPath, isDirectory: false)
+                            .path
+                    )
+                }
+            }
+            if let cachesURL {
+                list.append(cachesURL.appendingPathComponent("mailkb_db/workspace_kb.sqlite").path)
+                list.append(cachesURL.appendingPathComponent("mailkb_db/mailkb_db.sqlite").path)
+                list.append(cachesURL.appendingPathComponent("mailkb/workspace_kb.sqlite").path)
+                list.append(cachesURL.appendingPathComponent("mailkb/mailkb.sqlite").path)
+                list.append(cachesURL.appendingPathComponent("moxa-kb-runtime/moxa_kb.sqlite").path)
+            }
+            candidates = list
         }
 
         for candidate in candidates {
             let normalized = (candidate as NSString).standardizingPath
-            if normalized.contains("/.moxa-kb/") || normalized.hasSuffix("/.moxa-kb") || normalized.contains(".moxa-kb/") {
+            if normalized.contains("/.mailkb_db/")
+                || normalized.hasSuffix("/.mailkb_db")
+                || normalized.contains(".mailkb_db/")
+                || normalized.contains("/.mailkb/")
+                || normalized.hasSuffix("/.mailkb")
+                || normalized.contains(".mailkb/")
+                || normalized.contains("/.moxa-kb/")
+                || normalized.hasSuffix("/.moxa-kb")
+                || normalized.contains(".moxa-kb/")
+            {
                 ExtensionLogger.cache.error(
-                    "Blocked unsafe direct open of cold .moxa-kb database: \(normalized, privacy: .public)"
+                    "Blocked unsafe direct open of cold sync database: \(normalized, privacy: .public)"
                 )
                 continue
             }
@@ -986,7 +1013,7 @@ public final class AttachmentOrganizerService: Sendable {
 
         let stopwords: Set<String> = [
             "pdf", "xlsx", "xls", "docx", "doc", "pptx", "ppt", "zip", "rar",
-            "moxa", "final", "draft", "copy", "attachment", "file", "mail", "re", "fw",
+            "final", "draft", "copy", "attachment", "file", "mail", "re", "fw",
             "v1", "v2", "v3", "v4", "2024", "2025", "2026"
         ]
 
@@ -1122,7 +1149,8 @@ public final class AttachmentOrganizerService: Sendable {
         guard FileManager.default.fileExists(atPath: canonical.path, isDirectory: &isDir), isDir.boolValue else {
             throw AttachmentOrganizerError.invalidWorkspaceRoot(workspaceRootURL)
         }
-        if canonical.lastPathComponent.lowercased() == ".moxa-kb" || canonical.lastPathComponent.hasPrefix(".") {
+        let lowerRoot = canonical.lastPathComponent.lowercased()
+        if lowerRoot == ".mailkb_db" || lowerRoot == ".mailkb" || lowerRoot == ".moxa-kb" || canonical.lastPathComponent.hasPrefix(".") {
             throw AttachmentOrganizerError.hiddenDirectoryForbidden(canonical.path)
         }
         return canonical
@@ -1149,7 +1177,7 @@ public final class AttachmentOrganizerService: Sendable {
             if comp.isEmpty || comp == "." || comp == ".." {
                 throw AttachmentOrganizerError.unsafeRelativePath(rawFolder)
             }
-            if comp.hasPrefix(".") || comp.lowercased() == ".moxa-kb" {
+            if comp.hasPrefix(".") || comp.lowercased() == ".mailkb_db" || comp.lowercased() == ".mailkb" || comp.lowercased() == ".moxa-kb" {
                 throw AttachmentOrganizerError.hiddenDirectoryForbidden(rawFolder)
             }
         }
@@ -1164,7 +1192,7 @@ public final class AttachmentOrganizerService: Sendable {
         if trimmed == "." || trimmed == ".." {
             throw AttachmentOrganizerError.unsafeRelativePath(rawFilename)
         }
-        if trimmed.hasPrefix(".") || trimmed.lowercased() == ".moxa-kb" {
+        if trimmed.hasPrefix(".") || trimmed.lowercased() == ".mailkb_db" || trimmed.lowercased() == ".mailkb" || trimmed.lowercased() == ".moxa-kb" {
             throw AttachmentOrganizerError.hiddenDirectoryForbidden(rawFilename)
         }
         return trimmed
@@ -1352,7 +1380,7 @@ public final class AttachmentOrganizerService: Sendable {
         }
 
         // Write to a non-hidden staging file in the same directory, then atomically link/rename with RENAME_EXCL.
-        let tempName = "_moxa_tmp_\(UUID().uuidString)"
+        let tempName = "_mailkb_tmp_\(UUID().uuidString)"
         let tempURL = parentURL.appendingPathComponent(tempName, isDirectory: false)
         defer { try? FileManager.default.removeItem(at: tempURL) }
 

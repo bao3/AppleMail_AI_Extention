@@ -2,8 +2,8 @@ import Foundation
 import MailKit
 import OSLog
 
-/// Automatically triggers background Gemini pre-analysis when Apple Mail downloads
-/// new Moxa mailbox Primary messages, warming `AnalysisCacheStore` before the user opens them.
+/// Automatically triggers background AI pre-analysis when Apple Mail downloads
+/// new Primary messages, warming `AnalysisCacheStore` before the user opens them.
 final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked Sendable {
     nonisolated static let shared = MessageActionHandler()
 
@@ -32,7 +32,7 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
     }
 
     nonisolated var requiredHeaders: [String] {
-        MoxaPrimaryFilter.requiredHeaders
+        PrimaryMailFilter.requiredHeaders
     }
 
     nonisolated func decideAction(
@@ -41,8 +41,8 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
     ) {
         let once = DecisionOnceBox(completionHandler)
 
-        guard ExtensionOpsConfig.isAutoAnalyzeMoxaPrimaryEnabled else {
-            ExtensionLogger.action.debug("decideAction skipped: autoAnalyzeMoxaPrimary disabled")
+        guard ExtensionOpsConfig.isAutoAnalyzePrimaryEnabled else {
+            ExtensionLogger.action.debug("decideAction skipped: autoAnalyzePrimary disabled")
             once.finish(nil)
             return
         }
@@ -53,16 +53,16 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
             return
         }
 
-        // Pass 1: Metadata-only check before body download; ask Mail for body only if Moxa Primary passes.
+        // Pass 1: Metadata-only check before body download; ask Mail for body only if Primary passes.
         guard let rawData = message.rawData else {
             let input = makeFilterInput(from: message)
-            switch MoxaPrimaryFilter.evaluate(input) {
+            switch PrimaryMailFilter.evaluate(input) {
             case let .skip(reason):
                 ExtensionLogger.action.debug(
                     "decideAction skipped (no-body pass): \(reason.logDescription, privacy: .public)"
                 )
                 once.finish(nil)
-            case .allowMoxaPrimary:
+            case .allowPrimary:
                 if let headerMessageID = headerMessageID(from: message),
                    AnalysisCacheStore.shared.hasCachedAnalysis(forMessageID: headerMessageID)
                 {
@@ -70,7 +70,7 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
                     once.finish(nil)
                     return
                 }
-                ExtensionLogger.action.info("decideAction requesting full body via invokeAgainWithBody for Moxa Primary message")
+                ExtensionLogger.action.info("decideAction requesting full body via invokeAgainWithBody for Primary message")
                 once.finish(.invokeAgainWithBody)
             }
             return
@@ -99,7 +99,7 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
 
         let mimeHeaders = MIMEParser.extractTopLevelHeaders(rawData)
         let fullInput = makeFilterInput(from: message, extraHeaders: mimeHeaders)
-        if case let .skip(reason) = MoxaPrimaryFilter.evaluate(fullInput) {
+        if case let .skip(reason) = PrimaryMailFilter.evaluate(fullInput) {
             ExtensionLogger.action.debug(
                 "decideAction skipped (full-body pass): \(reason.logDescription, privacy: .public)"
             )
@@ -125,7 +125,7 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
         }
 
         ExtensionLogger.action.info(
-            "Starting background pre-analysis for Moxa Primary message (messageID=\(parsed.messageID, privacy: .private), bodyChars=\(parsed.plainBody.count, privacy: .public))"
+            "Starting background pre-analysis for Primary message (messageID=\(parsed.messageID, privacy: .private), bodyChars=\(parsed.plainBody.count, privacy: .public))"
         )
 
         Task.detached(priority: .utility) {
@@ -135,12 +135,12 @@ final class MessageActionHandler: NSObject, MEMessageActionHandler, @unchecked S
                     email: parsed,
                     tier: .fast
                 )
-                if ExtensionOpsConfig.isAutoFlagMoxaPrimaryEnabled,
+                if ExtensionOpsConfig.isAutoFlagPrimaryEnabled,
                    let mailFlag = analysis.resolvedFlag.mailKitFlag
                 {
                     decision = MEMessageActionDecision.action(.flag(mailFlag))
                     ExtensionLogger.action.info(
-                        "Auto-flagging Moxa Primary message with '\(analysis.resolvedFlag.rawValue, privacy: .public)' (\(analysis.resolvedFlag.label, privacy: .public))"
+                        "Auto-flagging Primary message with '\(analysis.resolvedFlag.rawValue, privacy: .public)' (\(analysis.resolvedFlag.label, privacy: .public))"
                     )
                 }
             } catch {

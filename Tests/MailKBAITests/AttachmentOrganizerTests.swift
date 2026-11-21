@@ -18,7 +18,7 @@ final class AttachmentOrganizerTests: XCTestCase {
         workspaceURL = base.appendingPathComponent("MockMoxaWorkspace", isDirectory: true)
         try FileManager.default.createDirectory(at: workspaceURL, withIntermediateDirectories: true)
 
-        defaultsSuiteName = "com.bao3.AppleMailAI.Tests.\(UUID().uuidString)"
+        defaultsSuiteName = "com.bao3.MailKBAI.Tests.\(UUID().uuidString)"
         testDefaults = UserDefaults(suiteName: defaultsSuiteName)!
     }
 
@@ -258,7 +258,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             messageID: "<sec-001@moxa.com>",
             subject: "Re: IEC 62443 & ENISA 漏洞管理流程正式文档",
             from: "Customer <sec@client.com>",
-            to: ["baoshan.wang@moxa.com"],
+            to: ["alex.chen@acme.example"],
             cc: [],
             dateString: "Fri, 20 Nov 2026 10:00:00 +0800",
             inReplyTo: nil,
@@ -282,7 +282,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             email: securityEmail,
             analysis: securityAnalysis,
             workspaceRootURL: workspaceURL,
-            runtimeMoxaDBPath: mockDBURL.path
+            runtimeWorkspaceDBPath: mockDBURL.path
         )
         XCTAssertEqual(secPlan.count, 1)
         XCTAssertEqual(secPlan[0].proposedRelativeFolder, "9_产品文件/信息安全相关文档(62443 CRA 63452)")
@@ -299,7 +299,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             messageID: "<dubai-001@moxa.com>",
             subject: "迪拜蓝线 CASCO DCS Switch 报价确认",
             from: "CASCO <pm@casco.com>",
-            to: ["baoshan.wang@moxa.com"],
+            to: ["alex.chen@acme.example"],
             cc: [],
             dateString: "Fri, 20 Nov 2026 11:00:00 +0800",
             inReplyTo: nil,
@@ -327,7 +327,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             email: projectEmail,
             analysis: projectAnalysis,
             workspaceRootURL: workspaceURL,
-            runtimeMoxaDBPath: mockDBURL.path
+            runtimeWorkspaceDBPath: mockDBURL.path
         )
         XCTAssertEqual(projPlan.count, 1)
         XCTAssertEqual(projPlan[0].proposedRelativeFolder, "2_项目/20250920_迪拜蓝线_CASCO")
@@ -343,7 +343,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             messageID: "<spr-001@moxa.com>",
             subject: "特价报价单 EDS-4012",
             from: "Sales <sales@moxa.com>",
-            to: ["baoshan.wang@moxa.com"],
+            to: ["alex.chen@acme.example"],
             cc: [],
             dateString: "Fri, 20 Nov 2026 12:00:00 +0800",
             inReplyTo: nil,
@@ -372,7 +372,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             email: sprEmail,
             analysis: sprAnalysis,
             workspaceRootURL: workspaceURL,
-            runtimeMoxaDBPath: mockDBURL.path
+            runtimeWorkspaceDBPath: mockDBURL.path
         )
         XCTAssertEqual(sprPlan.count, 1)
         XCTAssertTrue(
@@ -474,7 +474,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             email: email,
             analysis: analysis,
             workspaceRootURL: workspaceURL,
-            runtimeMoxaDBPath: missingDBPath,
+            runtimeWorkspaceDBPath: missingDBPath,
             aiRouter: { _, _ in
                 #"{"items":[{"payloadID":"\#(payload.id)","folder":"../outside","reason":"bad","confidence":"high"}]}"#
             }
@@ -488,7 +488,7 @@ final class AttachmentOrganizerTests: XCTestCase {
             email: email,
             analysis: analysis,
             workspaceRootURL: workspaceURL,
-            runtimeMoxaDBPath: missingDBPath,
+            runtimeWorkspaceDBPath: missingDBPath,
             aiRouter: { _, _ in
                 """
                 ```json
@@ -502,22 +502,30 @@ final class AttachmentOrganizerTests: XCTestCase {
         XCTAssertEqual(aiRefinedPlan[0].reason, "客户主档优先")
         XCTAssertEqual(aiRefinedPlan[0].confidence, "high")
 
-        // 3. Passing cold .moxa-kb DB path must be blocked safely without crashing or reading .moxa-kb
-        let coldDBDir = workspaceURL.appendingPathComponent(".moxa-kb", isDirectory: true)
-        try FileManager.default.createDirectory(at: coldDBDir, withIntermediateDirectories: true)
-        let coldDB = coldDBDir.appendingPathComponent("moxa_kb.sqlite")
-        try createMockMoxaKB(at: coldDB)
+        // 3. Passing cold .moxa-kb, .mailkb, or .mailkb_db DB path must be blocked safely without crashing or reading cold dir
+        for hiddenFolder in [".moxa-kb", ".mailkb", ".mailkb_db"] {
+            let coldDBDir = workspaceURL.appendingPathComponent(hiddenFolder, isDirectory: true)
+            try FileManager.default.createDirectory(at: coldDBDir, withIntermediateDirectories: true)
+            let coldFilename: String
+            switch hiddenFolder {
+            case ".mailkb_db": coldFilename = "mailkb_db.sqlite"
+            case ".mailkb": coldFilename = "mailkb.sqlite"
+            default: coldFilename = "moxa_kb.sqlite"
+            }
+            let coldDB = coldDBDir.appendingPathComponent(coldFilename)
+            try createMockMoxaKB(at: coldDB)
 
-        let blockedColdPlan = await AttachmentOrganizerService.shared.proposeFilingPlan(
-            payloads: [payload],
-            email: email,
-            analysis: analysis,
-            workspaceRootURL: workspaceURL,
-            runtimeMoxaDBPath: coldDB.path
-        )
-        XCTAssertEqual(blockedColdPlan.count, 1)
-        XCTAssertFalse(blockedColdPlan[0].candidateFolders.contains(where: { $0.contains(".moxa-kb") }))
-        XCTAssertFalse(blockedColdPlan[0].candidateFolders.contains(where: { $0.contains("信息安全") }))
+            let blockedColdPlan = await AttachmentOrganizerService.shared.proposeFilingPlan(
+                payloads: [payload],
+                email: email,
+                analysis: analysis,
+                workspaceRootURL: workspaceURL,
+                runtimeWorkspaceDBPath: coldDB.path
+            )
+            XCTAssertEqual(blockedColdPlan.count, 1)
+            XCTAssertFalse(blockedColdPlan[0].candidateFolders.contains(where: { $0.contains(hiddenFolder) }))
+            XCTAssertFalse(blockedColdPlan[0].candidateFolders.contains(where: { $0.contains("信息安全") }))
+        }
     }
 
     func testSHA256IdenticalSkipAndCollisionAutoRename() throws {
@@ -655,6 +663,10 @@ final class AttachmentOrganizerTests: XCTestCase {
             "../outside",
             "2_项目/../../outside",
             "/tmp/absolute",
+            ".mailkb_db",
+            "2_项目/.mailkb_db",
+            ".mailkb",
+            "2_项目/.mailkb",
             ".moxa-kb",
             "2_项目/.moxa-kb",
             ".git/hooks",
@@ -682,6 +694,8 @@ final class AttachmentOrganizerTests: XCTestCase {
             "../escape.pdf",
             "sub/file.pdf",
             ".hidden.pdf",
+            ".mailkb_db",
+            ".mailkb",
             ".moxa-kb"
         ]
         for badFilename in badFilenames {

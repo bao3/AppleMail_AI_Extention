@@ -888,7 +888,7 @@ public struct EmailAnalysisPanelView: View {
     private func historicalPricesSection(_ groups: [SKUPriceComparisonGroup]) -> some View {
         let allRevealed = !groups.isEmpty && groups.allSatisfy { revealedPriceGroupIDs.contains($0.id) }
         return MailSectionContainer(
-            title: "历史报价参考 · Outlook KB",
+            title: "历史报价参考 · MailKB",
             systemImage: "chart.line.uptrend.xyaxis",
             trailing: {
                 HStack(spacing: 8) {

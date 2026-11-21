@@ -124,7 +124,7 @@ public actor BackgroundAnalysisCoordinator {
         let activity = ActivityBox(
             token: ProcessInfo.processInfo.beginActivity(
                 options: [.userInitiatedAllowingIdleSystemSleep, .suddenTerminationDisabled],
-                reason: "AppleMailAI background analysis"
+                reason: "MailKBAI background analysis"
             )
         )
         defer {

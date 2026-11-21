@@ -16,8 +16,10 @@ final class KeychainSettingsViewModel: ObservableObject {
     @Published var maskedKeyStatus: String?
     @Published var workspaceDisplayPath: String?
 
-    @Published var autoAnalyzeMoxaPrimary: Bool
-    @Published var autoFlagMoxaPrimary: Bool
+    @Published var autoAnalyzePrimary: Bool
+    @Published var autoFlagPrimary: Bool
+    @Published var filterAllowedDomainsInput: String
+    @Published var filterSelfAddressesInput: String
     @Published var testingTier: AIModelTier?
     @Published var isFetchingModels = false
     @Published var fetchedModels: [String] = []
@@ -52,8 +54,11 @@ final class KeychainSettingsViewModel: ObservableObject {
         self.selectedTier = providerStore.preferredTier
         self.maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: active.id)
         self.workspaceDisplayPath = bookmarkStore.workspaceDisplayPath
-        self.autoAnalyzeMoxaPrimary = ExtensionOpsConfig.isAutoAnalyzeMoxaPrimaryEnabled
-        self.autoFlagMoxaPrimary = ExtensionOpsConfig.isAutoFlagMoxaPrimaryEnabled
+        self.autoAnalyzePrimary = ExtensionOpsConfig.isAutoAnalyzePrimaryEnabled
+        self.autoFlagPrimary = ExtensionOpsConfig.isAutoFlagPrimaryEnabled
+        let initialScope = PrimaryMailFilter.loadScope()
+        self.filterAllowedDomainsInput = initialScope.allowedDomains.joined(separator: ", ")
+        self.filterSelfAddressesInput = initialScope.selfAddresses.joined(separator: ", ")
     }
 
     func refreshState() {
@@ -70,8 +75,11 @@ final class KeychainSettingsViewModel: ObservableObject {
         selectedTier = providerStore.preferredTier
         maskedKeyStatus = keychain.maskedAPIKeyStatus(forProfileID: editingProfile.id)
         workspaceDisplayPath = bookmarkStore.workspaceDisplayPath
-        autoAnalyzeMoxaPrimary = ExtensionOpsConfig.isAutoAnalyzeMoxaPrimaryEnabled
-        autoFlagMoxaPrimary = ExtensionOpsConfig.isAutoFlagMoxaPrimaryEnabled
+        autoAnalyzePrimary = ExtensionOpsConfig.isAutoAnalyzePrimaryEnabled
+        autoFlagPrimary = ExtensionOpsConfig.isAutoFlagPrimaryEnabled
+        let scope = PrimaryMailFilter.loadScope()
+        filterAllowedDomainsInput = scope.allowedDomains.joined(separator: ", ")
+        filterSelfAddressesInput = scope.selfAddresses.joined(separator: ", ")
     }
 
     func selectProfile(_ profile: AIProviderProfile) {
@@ -196,6 +204,7 @@ final class KeychainSettingsViewModel: ObservableObject {
 
         providerStore.upsertProfile(editingProfile, makeActive: true)
         providerStore.setPreferredTier(selectedTier)
+        savePrimaryFilterScope()
         profiles = providerStore.profiles
         activeProfileID = editingProfile.id
 
@@ -253,14 +262,27 @@ final class KeychainSettingsViewModel: ObservableObject {
         isErrorStatus = false
     }
 
-    func updateAutoAnalyzeMoxaPrimary(_ enabled: Bool) {
-        autoAnalyzeMoxaPrimary = enabled
-        ExtensionOpsConfig.setAutoAnalyzeMoxaPrimaryEnabled(enabled)
+    func updateAutoAnalyzePrimary(_ enabled: Bool) {
+        autoAnalyzePrimary = enabled
+        ExtensionOpsConfig.setAutoAnalyzePrimaryEnabled(enabled)
     }
 
-    func updateAutoFlagMoxaPrimary(_ enabled: Bool) {
-        autoFlagMoxaPrimary = enabled
-        ExtensionOpsConfig.setAutoFlagMoxaPrimaryEnabled(enabled)
+    func updateAutoFlagPrimary(_ enabled: Bool) {
+        autoFlagPrimary = enabled
+        ExtensionOpsConfig.setAutoFlagPrimaryEnabled(enabled)
+    }
+
+    func savePrimaryFilterScope() {
+        var scope = PrimaryMailFilter.loadScope()
+        scope = PrimaryMailFilterScope(
+            allowedDomains: PrimaryMailFilterScope.parseCommaSeparated(filterAllowedDomainsInput, stripLeadingAt: true),
+            allowedTenantIDs: scope.allowedTenantIDs,
+            selfAddresses: PrimaryMailFilterScope.parseCommaSeparated(filterSelfAddressesInput),
+            customBotAddresses: scope.customBotAddresses
+        )
+        PrimaryMailFilter.saveScope(scope)
+        filterAllowedDomainsInput = scope.allowedDomains.joined(separator: ", ")
+        filterSelfAddressesInput = scope.selfAddresses.joined(separator: ", ")
     }
 
     var fallbackModelSuggestions: [String] {
@@ -794,7 +816,7 @@ public struct KeychainSettingsSheet: View {
     }
 
     private var workspaceBookmarkSection: some View {
-        MailSectionContainer(title: "Moxa 附件归档工作区（安全书签）", systemImage: "folder.badge.gearshape") {
+        MailSectionContainer(title: "附件智能归档工作区（安全书签）", systemImage: "folder.badge.gearshape") {
             VStack(alignment: .leading, spacing: 7) {
                 if let path = vm.workspaceDisplayPath {
                     Text(path)
@@ -802,7 +824,7 @@ public struct KeychainSettingsSheet: View {
                         .foregroundStyle(.primary)
                         .textSelection(.enabled)
                 } else {
-                    Text("尚未选择工作区根目录（推荐 ~/Documents/Moxa）")
+                    Text("尚未选择工作区根目录（例如 ~/Documents/Archive）")
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
@@ -830,10 +852,10 @@ public struct KeychainSettingsSheet: View {
         MailSectionContainer(title: "自动化与系统集成", systemImage: "wand.and.stars") {
             VStack(alignment: .leading, spacing: 7) {
                 Toggle(
-                    "后台自动分析 Moxa Primary 新邮件",
+                    "后台自动分析重点收件新邮件（Primary）",
                     isOn: Binding(
-                        get: { vm.autoAnalyzeMoxaPrimary },
-                        set: { vm.updateAutoAnalyzeMoxaPrimary($0) }
+                        get: { vm.autoAnalyzePrimary },
+                        set: { vm.updateAutoAnalyzePrimary($0) }
                     )
                 )
                 .font(.system(size: 12))
@@ -841,12 +863,43 @@ public struct KeychainSettingsSheet: View {
                 Toggle(
                     "后台自动标记 7 色邮件旗标（紧急待回 / 跟报价 / 技术卡点等）",
                     isOn: Binding(
-                        get: { vm.autoFlagMoxaPrimary },
-                        set: { vm.updateAutoFlagMoxaPrimary($0) }
+                        get: { vm.autoFlagPrimary },
+                        set: { vm.updateAutoFlagPrimary($0) }
                     )
                 )
                 .font(.system(size: 12))
-                .disabled(!vm.autoAnalyzeMoxaPrimary)
+                .disabled(!vm.autoAnalyzePrimary)
+
+                if vm.autoAnalyzePrimary {
+                    Divider().opacity(0.4)
+
+                    fieldRow(label: "限定域名") {
+                        TextField("留空则不限，例如 company.com", text: $vm.filterAllowedDomainsInput)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11.5))
+                            .onSubmit { vm.savePrimaryFilterScope() }
+                    }
+
+                    fieldRow(label: "本人邮箱") {
+                        TextField("可选，例如 me@company.com", text: $vm.filterSelfAddressesInput)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11.5))
+                            .onSubmit { vm.savePrimaryFilterScope() }
+                    }
+
+                    HStack {
+                        Text("自动跳过广告订阅、系统通知与日历回执；填写真实邮箱后同时跳过本人发出邮件。")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("保存过滤规则") {
+                            vm.savePrimaryFilterScope()
+                            vm.statusMessage = "已保存后台邮件过滤规则。"
+                            vm.isErrorStatus = false
+                        }
+                        .controlSize(.mini)
+                    }
+                }
             }
         }
     }

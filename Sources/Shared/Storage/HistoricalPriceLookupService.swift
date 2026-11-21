@@ -4,7 +4,7 @@ import SQLite3
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-/// A single historical SKU price row retrieved read-only from the staged `outlook.sqlite` cache.
+/// A single historical SKU price row retrieved read-only from the staged `mailkb.sqlite` (or legacy `outlook.sqlite`) cache.
 public struct HistoricalPriceRecord: Identifiable, Sendable, Hashable {
     public let id: String
     public let sku: String
@@ -138,7 +138,7 @@ public struct HistoricalEmailPriceEvidence: Identifiable, Sendable, Hashable {
     }
 }
 
-/// Non-inline attachment metadata recorded for a historical message in `outlook.sqlite`.
+/// Non-inline attachment metadata recorded for a historical message in `mailkb.sqlite`.
 public struct HistoricalEmailAttachmentInfo: Identifiable, Sendable, Hashable {
     public let id: String
     public let filename: String
@@ -153,7 +153,7 @@ public struct HistoricalEmailAttachmentInfo: Identifiable, Sendable, Hashable {
     }
 }
 
-/// Full read-only source email record & extracted price evidence loaded from `outlook.sqlite`.
+/// Full read-only source email record & extracted price evidence loaded from `mailkb.sqlite`.
 public struct HistoricalEmailDetail: Identifiable, Sendable, Hashable {
     public let id: Int64
     public let source: String
@@ -215,7 +215,7 @@ public struct HistoricalEmailDetail: Identifiable, Sendable, Hashable {
     }
 }
 
-/// Historical price comparison group for a candidate Moxa SKU found in an email.
+/// Historical price comparison group for a candidate model/SKU found in an email.
 public struct SKUPriceComparisonGroup: Identifiable, Sendable, Hashable {
     public let id: String
     public let queriedSKU: String
@@ -244,8 +244,10 @@ public struct SKUPriceComparisonGroup: Identifiable, Sendable, Hashable {
     }
 }
 
-/// Strictly read-only lookup service querying historical SKU prices from the staged `outlook.sqlite` runtime cache.
-/// Never opens `.moxa-kb/*.sqlite` directly; opens `~/.cache/moxa-kb-runtime/outlook.sqlite` (or staged cold copy)
+/// Strictly read-only lookup service querying historical SKU prices from the staged `mailkb_db.sqlite`
+/// (with `mailkb.sqlite` and legacy `outlook.sqlite` fallback) runtime cache.
+/// Never opens `.mailkb_db/*.sqlite`, `.mailkb/*.sqlite`, or `.moxa-kb/*.sqlite` directly; opens
+/// `~/.cache/mailkb_db/mailkb_db.sqlite` (or `~/.cache/mailkb/mailkb.sqlite` / `~/.cache/moxa-kb-runtime/outlook.sqlite` / staged cold copy)
 /// via SQLite URI `?mode=ro&immutable=1`.
 public final class HistoricalPriceLookupService: Sendable {
     public static let shared = HistoricalPriceLookupService()
@@ -576,7 +578,7 @@ public final class HistoricalPriceLookupService: Sendable {
     }
 
     /// Loads full read-only source emails, extracted price evidence snippets, and attachment metadata
-    /// from the staged `outlook.sqlite` cache so users can inspect historical emails inside the AI panel
+    /// from the staged `mailkb.sqlite` (or fallback `outlook.sqlite`) cache so users can inspect historical emails inside the AI panel
     /// without hitting Apple Mail's modal-window rendering lock.
     public func loadHistoricalEmailDetails(
         for record: HistoricalPriceRecord,
@@ -642,6 +644,24 @@ public final class HistoricalPriceLookupService: Sendable {
         coldDBURL: URL?,
         stagingDirectoryURL: URL?
     ) -> String? {
+        resolveReadableRuntimeDBPath(
+            explicitRuntimeDBPath: explicitRuntimeDBPath,
+            coldDBURL: coldDBURL,
+            stagingDirectoryURL: stagingDirectoryURL,
+            environment: ProcessInfo.processInfo.environment,
+            containerHomeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            realHomeDirectory: realUserHomeDirectoryPath()
+        )
+    }
+
+    static func resolveReadableRuntimeDBPath(
+        explicitRuntimeDBPath: String?,
+        coldDBURL: URL?,
+        stagingDirectoryURL: URL?,
+        environment: [String: String],
+        containerHomeDirectory: URL,
+        realHomeDirectory: String?
+    ) -> String? {
         if let explicit = explicitRuntimeDBPath?.trimmingCharacters(in: .whitespacesAndNewlines),
            !explicit.isEmpty
         {
@@ -659,25 +679,31 @@ public final class HistoricalPriceLookupService: Sendable {
             return nil
         }
 
-        let defaultRuntimePath = defaultRuntimeOutlookDBPath()
-        if !isForbiddenDirectKBPath(defaultRuntimePath),
-           FileManager.default.isReadableFile(atPath: defaultRuntimePath),
-           hasValidSQLiteHeader(atPath: defaultRuntimePath)
-        {
-            return defaultRuntimePath
+        let candidates = candidateRuntimeDBPaths(
+            environment: environment,
+            containerHomeDirectory: containerHomeDirectory,
+            realHomeDirectory: realHomeDirectory
+        )
+        for candidate in candidates {
+            if !isForbiddenDirectKBPath(candidate),
+               FileManager.default.isReadableFile(atPath: candidate),
+               hasValidSQLiteHeader(atPath: candidate)
+            {
+                return candidate
+            }
         }
 
         if let coldDBURL, let staged = stageColdDatabase(from: coldDBURL, stagingDirectoryURL: stagingDirectoryURL) {
             return staged
         }
 
-        if let existingStaged = resolvedStagingDir(override: stagingDirectoryURL)?
-            .appendingPathComponent("outlook.sqlite", isDirectory: false).path,
-           !isForbiddenDirectKBPath(existingStaged),
-           FileManager.default.isReadableFile(atPath: existingStaged),
-           hasValidSQLiteHeader(atPath: existingStaged)
-        {
-            return existingStaged
+        for fallbackStaged in fallbackStagedRuntimeDBPaths(stagingDirectoryURL: stagingDirectoryURL) {
+            if !isForbiddenDirectKBPath(fallbackStaged),
+               FileManager.default.isReadableFile(atPath: fallbackStaged),
+               hasValidSQLiteHeader(atPath: fallbackStaged)
+            {
+                return fallbackStaged
+            }
         }
 
         return nil
@@ -690,41 +716,136 @@ public final class HistoricalPriceLookupService: Sendable {
         return String(cString: dir)
     }
 
-    private static func defaultRuntimeOutlookDBPath() -> String {
-        if let envDir = ProcessInfo.processInfo.environment["MOXA_KB_RUNTIME_DIR"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !envDir.isEmpty
-        {
-            let expanded = (envDir as NSString).expandingTildeInPath
-            return URL(fileURLWithPath: expanded, isDirectory: true)
-                .appendingPathComponent("outlook.sqlite", isDirectory: false)
-                .standardizedFileURL.path
-        }
+    static func candidateRuntimeDBPaths(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        containerHomeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        realHomeDirectory: String? = realUserHomeDirectoryPath()
+    ) -> [String] {
+        var candidates: [String] = []
+        var seen = Set<String>()
 
-        let containerOrHomeCandidate = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache", isDirectory: true)
-            .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
-            .appendingPathComponent("outlook.sqlite", isDirectory: false)
-            .standardizedFileURL.path
-        if FileManager.default.isReadableFile(atPath: containerOrHomeCandidate) {
-            return containerOrHomeCandidate
-        }
-
-        // Inside macOS App Sandbox, homeDirectoryForCurrentUser points to the container Data folder,
-        // whereas com.apple.security.temporary-exception.files.home-relative-path.read-only grants
-        // read access to ~/.cache/moxa-kb-runtime/ in the real user home directory.
-        if let realHome = realUserHomeDirectoryPath() {
-            let realCandidate = URL(fileURLWithPath: realHome, isDirectory: true)
-                .appendingPathComponent(".cache", isDirectory: true)
-                .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
-                .appendingPathComponent("outlook.sqlite", isDirectory: false)
-                .standardizedFileURL.path
-            if FileManager.default.isReadableFile(atPath: realCandidate) {
-                return realCandidate
+        func appendCandidate(_ path: String) {
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            if seen.insert(standardized).inserted {
+                candidates.append(standardized)
             }
         }
 
-        return containerOrHomeCandidate
+        if let envDir = environment["MAILKB_DB_RUNTIME_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !envDir.isEmpty
+        {
+            let expanded = (envDir as NSString).expandingTildeInPath
+            let base = URL(fileURLWithPath: expanded, isDirectory: true)
+            appendCandidate(base.appendingPathComponent("mailkb_db.sqlite", isDirectory: false).path)
+            appendCandidate(base.appendingPathComponent("mailkb.sqlite", isDirectory: false).path)
+            appendCandidate(base.appendingPathComponent("outlook.sqlite", isDirectory: false).path)
+        }
+
+        if let envDir = environment["MAILKB_RUNTIME_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !envDir.isEmpty
+        {
+            let expanded = (envDir as NSString).expandingTildeInPath
+            let base = URL(fileURLWithPath: expanded, isDirectory: true)
+            appendCandidate(base.appendingPathComponent("mailkb_db.sqlite", isDirectory: false).path)
+            appendCandidate(base.appendingPathComponent("mailkb.sqlite", isDirectory: false).path)
+            appendCandidate(base.appendingPathComponent("outlook.sqlite", isDirectory: false).path)
+        }
+
+        appendCandidate(
+            containerHomeDirectory
+                .appendingPathComponent(".cache", isDirectory: true)
+                .appendingPathComponent("mailkb_db", isDirectory: true)
+                .appendingPathComponent("mailkb_db.sqlite", isDirectory: false)
+                .path
+        )
+
+        // Inside macOS App Sandbox, homeDirectoryForCurrentUser points to the container Data folder,
+        // whereas com.apple.security.temporary-exception.files.home-relative-path.read-only grants
+        // read access to ~/.cache/mailkb_db/, ~/.cache/mailkb/, and ~/.cache/moxa-kb-runtime/ in the real user home directory.
+        if let realHomeDirectory, !realHomeDirectory.isEmpty {
+            appendCandidate(
+                URL(fileURLWithPath: realHomeDirectory, isDirectory: true)
+                    .appendingPathComponent(".cache", isDirectory: true)
+                    .appendingPathComponent("mailkb_db", isDirectory: true)
+                    .appendingPathComponent("mailkb_db.sqlite", isDirectory: false)
+                    .path
+            )
+        }
+
+        appendCandidate(
+            containerHomeDirectory
+                .appendingPathComponent(".cache", isDirectory: true)
+                .appendingPathComponent("mailkb", isDirectory: true)
+                .appendingPathComponent("mailkb.sqlite", isDirectory: false)
+                .path
+        )
+
+        if let realHomeDirectory, !realHomeDirectory.isEmpty {
+            appendCandidate(
+                URL(fileURLWithPath: realHomeDirectory, isDirectory: true)
+                    .appendingPathComponent(".cache", isDirectory: true)
+                    .appendingPathComponent("mailkb", isDirectory: true)
+                    .appendingPathComponent("mailkb.sqlite", isDirectory: false)
+                    .path
+            )
+        }
+
+        if let legacyEnvDir = environment["MOXA_KB_RUNTIME_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !legacyEnvDir.isEmpty
+        {
+            let expanded = (legacyEnvDir as NSString).expandingTildeInPath
+            appendCandidate(
+                URL(fileURLWithPath: expanded, isDirectory: true)
+                    .appendingPathComponent("outlook.sqlite", isDirectory: false)
+                    .path
+            )
+        }
+
+        appendCandidate(
+            containerHomeDirectory
+                .appendingPathComponent(".cache", isDirectory: true)
+                .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
+                .appendingPathComponent("outlook.sqlite", isDirectory: false)
+                .path
+        )
+
+        if let realHomeDirectory, !realHomeDirectory.isEmpty {
+            appendCandidate(
+                URL(fileURLWithPath: realHomeDirectory, isDirectory: true)
+                    .appendingPathComponent(".cache", isDirectory: true)
+                    .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
+                    .appendingPathComponent("outlook.sqlite", isDirectory: false)
+                    .path
+            )
+        }
+
+        return candidates
+    }
+
+    private static func fallbackStagedRuntimeDBPaths(stagingDirectoryURL: URL?) -> [String] {
+        var paths: [String] = []
+        if let primaryDir = resolvedStagingDir(override: stagingDirectoryURL) {
+            paths.append(primaryDir.appendingPathComponent("mailkb_db.sqlite", isDirectory: false).standardizedFileURL.path)
+            paths.append(primaryDir.appendingPathComponent("mailkb.sqlite", isDirectory: false).standardizedFileURL.path)
+            paths.append(primaryDir.appendingPathComponent("outlook.sqlite", isDirectory: false).standardizedFileURL.path)
+        }
+        if stagingDirectoryURL == nil,
+           let cachesRoot = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        {
+            paths.append(
+                cachesRoot
+                    .appendingPathComponent("mailkb", isDirectory: true)
+                    .appendingPathComponent("mailkb.sqlite", isDirectory: false)
+                    .standardizedFileURL.path
+            )
+            paths.append(
+                cachesRoot
+                    .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
+                    .appendingPathComponent("outlook.sqlite", isDirectory: false)
+                    .standardizedFileURL.path
+            )
+        }
+        return paths
     }
 
     private static func resolvedStagingDir(override: URL?) -> URL? {
@@ -733,7 +854,7 @@ public final class HistoricalPriceLookupService: Sendable {
         }
         return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first?
-            .appendingPathComponent("moxa-kb-runtime", isDirectory: true)
+            .appendingPathComponent("mailkb_db", isDirectory: true)
     }
 
     private static func stageColdDatabase(from coldDBURL: URL, stagingDirectoryURL: URL?) -> String? {
@@ -788,8 +909,8 @@ public final class HistoricalPriceLookupService: Sendable {
             return nil
         }
 
-        let destURL = standardizedStaging.appendingPathComponent("outlook.sqlite", isDirectory: false)
-        let stampURL = standardizedStaging.appendingPathComponent("outlook.sqlite.stamp", isDirectory: false)
+        let destURL = standardizedStaging.appendingPathComponent("mailkb_db.sqlite", isDirectory: false)
+        let stampURL = standardizedStaging.appendingPathComponent("mailkb_db.sqlite.stamp", isDirectory: false)
         let expectedStamp = "\(coldDBURL.path)|\(statBuf.st_size)|\(statBuf.st_mtimespec.tv_sec)|\(statBuf.st_mtimespec.tv_nsec)"
 
         if FileManager.default.isReadableFile(atPath: destURL.path),
@@ -799,7 +920,7 @@ public final class HistoricalPriceLookupService: Sendable {
             return destURL.path
         }
 
-        let tempURL = standardizedStaging.appendingPathComponent("outlook.sqlite.tmp.\(UUID().uuidString)", isDirectory: false)
+        let tempURL = standardizedStaging.appendingPathComponent("mailkb_db.sqlite.tmp.\(UUID().uuidString)", isDirectory: false)
         let destFD = Darwin.open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         guard destFD >= 0 else {
             return nil
@@ -850,7 +971,7 @@ public final class HistoricalPriceLookupService: Sendable {
     private static func openReadOnlyDatabase(atPath path: String) -> OpaquePointer? {
         let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
         guard !isForbiddenDirectKBPath(standardized) else {
-            ExtensionLogger.cache.error("Blocked direct sqlite3 open inside .moxa-kb sync directory")
+            ExtensionLogger.cache.error("Blocked direct sqlite3 open inside .mailkb_db/.mailkb/.moxa-kb sync directory")
             return nil
         }
         guard FileManager.default.isReadableFile(atPath: standardized),
@@ -2056,12 +2177,13 @@ public final class HistoricalPriceLookupService: Sendable {
     }
 
     private static func isForbiddenDirectKBPath(_ path: String) -> Bool {
+        let forbiddenDirs: Set<String> = [".mailkb_db", ".mailkb", ".moxa-kb"]
         let standardizedComponents = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
-        if standardizedComponents.contains(".moxa-kb") {
+        if standardizedComponents.contains(where: { forbiddenDirs.contains($0) }) {
             return true
         }
         let resolvedComponents = URL(fileURLWithPath: path).resolvingSymlinksInPath().pathComponents
-        return resolvedComponents.contains(".moxa-kb")
+        return resolvedComponents.contains(where: { forbiddenDirs.contains($0) })
     }
 
     private static func isInsideMailContainer(_ path: String) -> Bool {

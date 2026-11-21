@@ -41,11 +41,63 @@ public struct MessageFilterInput: Sendable {
     }
 }
 
+public struct PrimaryMailFilterScope: Codable, Equatable, Sendable {
+    public var allowedDomains: [String]
+    public var allowedTenantIDs: [String]
+    public var selfAddresses: [String]
+    public var customBotAddresses: [String]
+
+    public init(
+        allowedDomains: [String] = [],
+        allowedTenantIDs: [String] = [],
+        selfAddresses: [String] = [],
+        customBotAddresses: [String] = []
+    ) {
+        self.allowedDomains = Self.normalizeItems(allowedDomains, stripLeadingAt: true)
+        self.allowedTenantIDs = Self.normalizeItems(allowedTenantIDs, stripLeadingAt: false)
+        self.selfAddresses = Self.normalizeItems(selfAddresses, stripLeadingAt: false)
+        self.customBotAddresses = Self.normalizeItems(customBotAddresses, stripLeadingAt: false)
+    }
+
+    public var hasAccountRestriction: Bool {
+        !allowedDomains.isEmpty || !allowedTenantIDs.isEmpty
+    }
+
+    public func matchesAllowedDomain(_ email: String) -> Bool {
+        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let atIdx = lower.lastIndex(of: "@") else { return false }
+        let domain = String(lower[lower.index(after: atIdx)...])
+        guard !domain.isEmpty else { return false }
+        return allowedDomains.contains { allowed in
+            domain == allowed || domain.hasSuffix(".\(allowed)")
+        }
+    }
+
+    public static func parseCommaSeparated(_ raw: String, stripLeadingAt: Bool = false) -> [String] {
+        let parts = raw.components(separatedBy: CharacterSet(charactersIn: ",，;\n"))
+        return normalizeItems(parts, stripLeadingAt: stripLeadingAt)
+    }
+
+    private static func normalizeItems(_ rawItems: [String], stripLeadingAt: Bool) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for item in rawItems {
+            var cleaned = item.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if stripLeadingAt, cleaned.hasPrefix("@") {
+                cleaned = String(cleaned.dropFirst())
+            }
+            guard !cleaned.isEmpty, seen.insert(cleaned).inserted else { continue }
+            result.append(cleaned)
+        }
+        return result
+    }
+}
+
 public enum FilterSkipReason: Equatable, Sendable {
     case notReceivedState
     case encrypted
     case tooOld
-    case nonMoxaAccount(String)
+    case outOfScopeAccount(String)
     case selfSent
     case spamOrBulk(String)
     case newsletterOrPromotion(String)
@@ -60,8 +112,8 @@ public enum FilterSkipReason: Equatable, Sendable {
             return "encrypted"
         case .tooOld:
             return "tooOld(>48h)"
-        case let .nonMoxaAccount(detail):
-            return "nonMoxaAccount(\(detail))"
+        case let .outOfScopeAccount(detail):
+            return "outOfScopeAccount(\(detail))"
         case .selfSent:
             return "selfSent"
         case let .spamOrBulk(detail):
@@ -77,14 +129,14 @@ public enum FilterSkipReason: Equatable, Sendable {
 }
 
 public enum FilterDecision: Equatable, Sendable {
-    case allowMoxaPrimary
+    case allowPrimary
     case skip(FilterSkipReason)
 }
 
-/// Deterministic filter restricting background AI pre-analysis strictly to Moxa mailbox Primary messages.
-public enum MoxaPrimaryFilter {
-    public static let moxaTenantID = "5571c7d4-286b-47f6-9dd5-0aa688773c8e"
-    public static let userMoxaAddress = "baoshan.wang@moxa.com"
+/// Deterministic filter restricting background AI pre-analysis to recent, non-bulk Primary messages,
+/// with optional domain/tenant/self-address scoping configured by the user.
+public enum PrimaryMailFilter {
+    public static let scopeDefaultsKey = "com.bao3.MailKBAI.primaryFilterScope.v1"
     public static let maxAutoAnalyzeAgeSeconds: TimeInterval = 48 * 3600
 
     public static let requiredHeaders: [String] = [
@@ -100,12 +152,6 @@ public enum MoxaPrimaryFilter {
         "precedence",
         "auto-submitted",
         "x-auto-response-suppress"
-    ]
-
-    private static let botAddresses: Set<String> = [
-        "portal.admin@moxa.com",
-        "oa.admin@moxa.com",
-        "it@moxa.com"
     ]
 
     private static let botLocalSubstrings: [String] = [
@@ -124,7 +170,9 @@ public enum MoxaPrimaryFilter {
         "alerts",
         "system",
         "daemon",
-        "bounces"
+        "bounces",
+        "portal.admin",
+        "oa.admin"
     ]
 
     private static let calendarPrefixes: [String] = [
@@ -143,7 +191,47 @@ public enum MoxaPrimaryFilter {
         "已取消："
     ]
 
-    public static func evaluate(_ input: MessageFilterInput, now: Date = Date()) -> FilterDecision {
+    public static func loadScope(
+        from defaults: UserDefaults = SharedAppGroup.sharedUserDefaults
+    ) -> PrimaryMailFilterScope {
+        guard let data = defaults.data(forKey: scopeDefaultsKey),
+              let decoded = try? JSONDecoder().decode(PrimaryMailFilterScope.self, from: data)
+        else {
+            return PrimaryMailFilterScope()
+        }
+        return PrimaryMailFilterScope(
+            allowedDomains: decoded.allowedDomains,
+            allowedTenantIDs: decoded.allowedTenantIDs,
+            selfAddresses: decoded.selfAddresses,
+            customBotAddresses: decoded.customBotAddresses
+        )
+    }
+
+    public static func saveScope(
+        _ scope: PrimaryMailFilterScope,
+        to defaults: UserDefaults = SharedAppGroup.sharedUserDefaults
+    ) {
+        let normalized = PrimaryMailFilterScope(
+            allowedDomains: scope.allowedDomains,
+            allowedTenantIDs: scope.allowedTenantIDs,
+            selfAddresses: scope.selfAddresses,
+            customBotAddresses: scope.customBotAddresses
+        )
+        if let encoded = try? JSONEncoder().encode(normalized) {
+            defaults.set(encoded, forKey: scopeDefaultsKey)
+            if defaults === SharedAppGroup.sharedUserDefaults {
+                SharedAppGroup.postDistributedConfigDidChange()
+            }
+        }
+    }
+
+    public static func evaluate(
+        _ input: MessageFilterInput,
+        scope: PrimaryMailFilterScope? = nil,
+        now: Date = Date()
+    ) -> FilterDecision {
+        let resolvedScope = scope ?? loadScope()
+
         guard input.isReceivedState else {
             return .skip(.notReceivedState)
         }
@@ -157,36 +245,48 @@ public enum MoxaPrimaryFilter {
             return .skip(.tooOld)
         }
 
-        // 1. Moxa mailbox scope check (with Delivered-To guard against forwarded personal mailbox copies).
+        // 1. Optional account/domain/tenant scope check when configured by user.
         let deliveredToValues = headerValues("delivered-to", in: input.headers)
-        let deliveredEmails = extractEmailAddresses(from: deliveredToValues)
-        if !deliveredEmails.isEmpty && !deliveredEmails.contains(where: isMoxaDomain) {
-            return .skip(.nonMoxaAccount("delivered-to non-moxa"))
+        if resolvedScope.hasAccountRestriction {
+            let deliveredEmails = extractEmailAddresses(from: deliveredToValues)
+            if !deliveredEmails.isEmpty,
+               !resolvedScope.allowedDomains.isEmpty,
+               !deliveredEmails.contains(where: { resolvedScope.matchesAllowedDomain($0) })
+            {
+                return .skip(.outOfScopeAccount("delivered-to outside allowed domains"))
+            }
+
+            let tenantIDs = headerValues("x-ms-exchange-crosstenant-id", in: input.headers)
+            let hasAllowedTenant = !resolvedScope.allowedTenantIDs.isEmpty && tenantIDs.contains { raw in
+                let lower = raw.lowercased()
+                return resolvedScope.allowedTenantIDs.contains { lower.contains($0) }
+            }
+
+            let recipientPool = input.allRecipientAddresses
+                + input.toAddresses
+                + input.ccAddresses
+                + input.bccAddresses
+                + deliveredToValues
+                + headerValues("to", in: input.headers)
+                + headerValues("cc", in: input.headers)
+            let recipientEmails = extractEmailAddresses(from: recipientPool)
+            let hasAllowedRecipient = !resolvedScope.allowedDomains.isEmpty
+                && recipientEmails.contains(where: { resolvedScope.matchesAllowedDomain($0) })
+
+            guard hasAllowedTenant || hasAllowedRecipient else {
+                return .skip(.outOfScopeAccount("outside configured scope"))
+            }
         }
 
-        let tenantIDs = headerValues("x-ms-exchange-crosstenant-id", in: input.headers)
-        let hasMoxaTenant = tenantIDs.contains { $0.lowercased().contains(moxaTenantID) }
-
-        let recipientPool = input.allRecipientAddresses
-            + input.toAddresses
-            + input.ccAddresses
-            + input.bccAddresses
-            + deliveredToValues
-            + headerValues("to", in: input.headers)
-            + headerValues("cc", in: input.headers)
-        let recipientEmails = extractEmailAddresses(from: recipientPool)
-        let hasMoxaRecipient = recipientEmails.contains(where: isMoxaDomain)
-
-        guard hasMoxaTenant || hasMoxaRecipient else {
-            return .skip(.nonMoxaAccount("not moxa"))
-        }
-
-        // 2. Self-sent exclusion.
+        // 2. Self-sent exclusion (when user configures selfAddresses).
         let senderCandidates = extractEmailAddresses(
             from: [input.fromAddress] + headerValues("from", in: input.headers)
         )
-        if senderCandidates.contains(userMoxaAddress) {
-            return .skip(.selfSent)
+        if !resolvedScope.selfAddresses.isEmpty {
+            let selfSet = Set(resolvedScope.selfAddresses)
+            if senderCandidates.contains(where: { selfSet.contains($0) }) {
+                return .skip(.selfSent)
+            }
         }
 
         // 3. Primary classification filters (spam / bulk / newsletter / automated / calendar).
@@ -224,8 +324,9 @@ public enum MoxaPrimaryFilter {
             }
         }
 
+        let customBots = Set(resolvedScope.customBotAddresses)
         for sender in senderCandidates {
-            if isBotSender(sender) {
+            if isBotSender(sender, customBots: customBots) {
                 return .skip(.automatedSystem("bot sender"))
             }
         }
@@ -241,14 +342,17 @@ public enum MoxaPrimaryFilter {
             if combinedTokens.contains("all") {
                 return .skip(.automatedSystem("suppress-all"))
             }
-            if combinedTokens.contains("oof") || combinedTokens.contains("autoreply") {
+            if (combinedTokens.contains("oof") || combinedTokens.contains("autoreply")),
+               !resolvedScope.selfAddresses.isEmpty
+            {
+                let selfSet = Set(resolvedScope.selfAddresses)
                 let directRecipientEmails = extractEmailAddresses(
                     from: input.toAddresses
                         + input.ccAddresses
                         + headerValues("to", in: input.headers)
                         + headerValues("cc", in: input.headers)
                 )
-                if !directRecipientEmails.contains(userMoxaAddress) {
+                if !directRecipientEmails.contains(where: { selfSet.contains($0) }) {
                     return .skip(.automatedSystem("mass-broadcast"))
                 }
             }
@@ -261,7 +365,7 @@ public enum MoxaPrimaryFilter {
             return .skip(.calendarNotification)
         }
 
-        return .allowMoxaPrimary
+        return .allowPrimary
     }
 
     // MARK: - Helpers
@@ -276,14 +380,9 @@ public enum MoxaPrimaryFilter {
         }
     }
 
-    private static func isMoxaDomain(_ email: String) -> Bool {
+    private static func isBotSender(_ email: String, customBots: Set<String>) -> Bool {
         let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return lower.hasSuffix("@moxa.com") || lower.hasSuffix(".moxa.com")
-    }
-
-    private static func isBotSender(_ email: String) -> Bool {
-        let lower = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if botAddresses.contains(lower) || lower.hasSuffix("@teams.mail.microsoft") {
+        if customBots.contains(lower) || lower.hasSuffix("@teams.mail.microsoft") {
             return true
         }
         guard let atIdx = lower.firstIndex(of: "@") else { return false }

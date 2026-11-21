@@ -6,7 +6,7 @@ import SQLite3
 private enum BatchCLIError: LocalizedError {
     case invalidArguments(String)
     case missingConfigPlist(String)
-    case missingMagpieProfile(String)
+    case missingProviderProfile(String)
     case vertexForbidden(String)
     case missingAPIKey(String)
     case sqliteOpenFailed(String)
@@ -21,20 +21,20 @@ private enum BatchCLIError: LocalizedError {
             return "参数错误: \(msg)"
         case let .missingConfigPlist(path):
             return "找不到扩展配置文件: \(path)"
-        case let .missingMagpieProfile(msg):
-            return "未在扩展配置中找到 Magpie 服务商配置: \(msg)"
+        case let .missingProviderProfile(msg):
+            return "未在扩展配置中找到可用的 AI 服务商配置: \(msg)"
         case let .vertexForbidden(msg):
-            return "安全拦截：禁止调用 Google Vertex AI（\(msg)），必须使用 Magpie。"
+            return "安全拦截：默认禁止在批处理中调用 Google Vertex AI（\(msg)），如需使用请传入 --allow-vertex。"
         case let .missingAPIKey(msg):
-            return "无法从 Keychain 读取 Magpie API Key: \(msg)"
+            return "无法从 Keychain 读取 API Key: \(msg)"
         case let .sqliteOpenFailed(msg):
             return "只读打开 Apple Mail Envelope Index 失败: \(msg)"
         case let .sqliteQueryFailed(msg):
             return "查询 Apple Mail Envelope Index 失败: \(msg)"
         case let .insufficientEmails(found, required):
-            return "Moxa 有效工作邮件数量不足：仅找到 \(found) 封（需要 \(required) 封）"
+            return "有效工作邮件数量不足：仅找到 \(found) 封（需要 \(required) 封）"
         case let .tooManyConsecutiveFailures(count, lastError):
-            return "Magpie 接口连续失败 \(count) 次，中止批处理。最近错误: \(lastError)"
+            return "AI 接口连续失败 \(count) 次，中止批处理。最近错误: \(lastError)"
         case let .appleScriptPermissionDenied(msg):
             return "Apple Mail AppleScript 打标权限被拒绝或被阻塞: \(msg)"
         }
@@ -46,6 +46,13 @@ private struct CLIOptions: Sendable {
     var concurrency: Int = 8
     var applyFlags: Bool = true
     var reportJSONPath: String?
+    var accountFilter: String? = {
+        let env = ProcessInfo.processInfo.environment["APPLE_MAIL_ACCOUNT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (env?.isEmpty == false) ? env : nil
+    }()
+    var providerQuery: String?
+    var allowVertex: Bool = false
 
     static func parse(_ args: [String]) throws -> CLIOptions {
         var opts = CLIOptions()
@@ -65,6 +72,20 @@ private struct CLIOptions: Sendable {
                     throw BatchCLIError.invalidArguments("--concurrency 需要 1~32 整数")
                 }
                 opts.concurrency = val
+            case "--account":
+                idx += 1
+                guard idx < args.count, !args[idx].isEmpty else {
+                    throw BatchCLIError.invalidArguments("--account 需要账户 UUID 或前缀")
+                }
+                opts.accountFilter = args[idx]
+            case "--provider":
+                idx += 1
+                guard idx < args.count, !args[idx].isEmpty else {
+                    throw BatchCLIError.invalidArguments("--provider 需要服务商名称或 ID")
+                }
+                opts.providerQuery = args[idx]
+            case "--allow-vertex":
+                opts.allowVertex = true
             case "--apply-flags":
                 opts.applyFlags = true
             case "--no-apply-flags":
@@ -89,6 +110,7 @@ private struct CandidateEmail: Sendable {
     let dateReceivedUnix: Int64
     let dateReceivedISO: String
     let mailboxURL: String
+    let accountID: String
     let mailboxName: String
     let wasFlaggedInMail: Bool
     let existingFlagColor: Int
@@ -103,6 +125,7 @@ private struct BatchEmailResult: Codable, Sendable {
     let dateReceivedUnix: Int64
     let dateReceivedISO: String
     let mailboxURL: String
+    let accountID: String
     let mailboxName: String
     let subject: String
     let from: String
@@ -184,17 +207,17 @@ private actor BatchExecutionState {
 @main
 struct BatchSummarizeMain {
     private static let extensionPlistPath =
+        "\(NSHomeDirectory())/Library/Containers/com.bao3.MailKBAI.Extension/Data/Library/Preferences/com.bao3.MailKBAI.Extension.plist"
+    private static let legacyExtensionPlistPath =
         "\(NSHomeDirectory())/Library/Containers/com.bao3.AppleMailAI.Extension/Data/Library/Preferences/com.bao3.AppleMailAI.Extension.plist"
     private static let extensionAppSupportDir =
-        URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Containers/com.bao3.AppleMailAI.Extension/Data/Library/Application Support", isDirectory: true)
+        URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Containers/com.bao3.MailKBAI.Extension/Data/Library/Application Support", isDirectory: true)
     private static let hostAppSupportDir =
-        URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Containers/com.bao3.AppleMailAI/Data/Library/Application Support", isDirectory: true)
-    private static let moxaMailDir =
-        URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Mail/V10/E94D4074-9E81-4F1D-9310-9E94C36EDEA2", isDirectory: true)
+        URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Containers/com.bao3.MailKBAI/Data/Library/Application Support", isDirectory: true)
+    private static let mailV10Root =
+        URL(fileURLWithPath: "\(NSHomeDirectory())/Library/Mail/V10", isDirectory: true)
     private static let envelopeIndexURI =
         "file://\(NSHomeDirectory())/Library/Mail/V10/MailData/Envelope%20Index?mode=ro"
-    private static let moxaAccountPrefix =
-        "ews://E94D4074-9E81-4F1D-9310-9E94C36EDEA2/"
     private static let maxPassthroughRawBytes = 25 * 1024 * 1024
 
     static func main() async {
@@ -208,12 +231,12 @@ struct BatchSummarizeMain {
 
     private static func run() async throws {
         let opts = try CLIOptions.parse(CommandLine.arguments)
-        logLine("=== AppleMailAIBatch 启动 (limit=\(opts.limit), concurrency=\(opts.concurrency), applyFlags=\(opts.applyFlags)) ===")
+        logLine("=== MailKBAIBatch 启动 (limit=\(opts.limit), concurrency=\(opts.concurrency), applyFlags=\(opts.applyFlags)) ===")
 
-        // (A) Strictly load Extension Magpie config & API key (forbid Vertex AI)
-        let (magpieProfile, apiKey) = try loadAndValidateMagpieConfig()
-        let modelName = magpieProfile.modelName(for: .fast)
-        logLine("✅ 已锁定扩展服务商: \(magpieProfile.name) | kind=\(magpieProfile.kind.rawValue) | baseURL=\(magpieProfile.normalizedBaseURL) | model=\(modelName)")
+        // (A) Load active provider config, filter scope & API key
+        let (activeProfile, apiKey, filterScope) = try loadAndValidateProviderConfig(options: opts)
+        let modelName = activeProfile.modelName(for: .fast)
+        logLine("✅ 已锁定扩展服务商: \(activeProfile.name) | kind=\(activeProfile.kind.rawValue) | baseURL=\(activeProfile.normalizedBaseURL) | model=\(modelName)")
 
         let sessionConfig = URLSessionConfiguration.ephemeral
         sessionConfig.httpMaximumConnectionsPerHost = max(12, opts.concurrency + 4)
@@ -222,21 +245,27 @@ struct BatchSummarizeMain {
         sessionConfig.requestCachePolicy = .reloadIgnoringLocalCacheData
         let aiClient = AIServiceClient(session: URLSession(configuration: sessionConfig))
 
-        // (B) Read-only scan of Moxa recent N valid working emails
-        let emlxIndex = buildEmlxIndex(under: moxaMailDir)
-        logLine("📁 已索引 Moxa 本地邮件文件数: \(emlxIndex.count)")
+        // (B) Read-only scan of recent N valid working emails across configured Apple Mail V10 account(s)
+        let accountDirs = discoverMailAccountDirs(under: mailV10Root, accountFilter: opts.accountFilter)
+        let emlxIndex = buildEmlxIndex(under: accountDirs)
+        logLine("📁 已扫描 \(accountDirs.count) 个本地邮箱目录，索引 .emlx 文件数: \(emlxIndex.count)")
 
-        let (candidates, skipStats) = try collectValidMoxaCandidates(limit: opts.limit, emlxIndex: emlxIndex)
+        let (candidates, skipStats) = try collectValidCandidates(
+            limit: opts.limit,
+            accountFilter: opts.accountFilter,
+            filterScope: filterScope,
+            emlxIndex: emlxIndex
+        )
         guard candidates.count == opts.limit else {
             throw BatchCLIError.insufficientEmails(found: candidates.count, required: opts.limit)
         }
 
         let mailboxDist = Dictionary(grouping: candidates, by: \.mailboxName).mapValues(\.count)
-        logLine("📬 已筛选出 \(candidates.count) 封有效 Moxa 工作邮件（时间范围: \(candidates.last?.dateReceivedISO ?? "") .. \(candidates.first?.dateReceivedISO ?? "")）")
+        logLine("📬 已筛选出 \(candidates.count) 封有效工作邮件（时间范围: \(candidates.last?.dateReceivedISO ?? "") .. \(candidates.first?.dateReceivedISO ?? "")）")
         logLine("   来源分布: \(formatCounts(mailboxDist))")
         logLine("   过滤跳过统计: \(formatCounts(skipStats))")
 
-        // (C) Summarize concurrently with Magpie and persist into shared App Group + Extension + HostApp caches
+        // (C) Summarize concurrently and persist into shared App Group + Extension + HostApp caches
         let groupAppSupportDir = findSharedAppGroupContainer()?
             .appendingPathComponent("Library", isDirectory: true)
             .appendingPathComponent("Application Support", isDirectory: true)
@@ -269,7 +298,7 @@ struct BatchSummarizeMain {
         }
 
         let initialSnap = await state.progressSnapshot()
-        logLine("💾 命中现有缓存: \(initialSnap.reusedCache) 封 | 待调用 Magpie 总结: \(pending.count) 封")
+        logLine("💾 命中现有缓存: \(initialSnap.reusedCache) 封 | 待调用 \(activeProfile.name) 总结: \(pending.count) 封")
 
         if !pending.isEmpty {
             let maxWorkers = min(opts.concurrency, pending.count)
@@ -287,7 +316,7 @@ struct BatchSummarizeMain {
                         do {
                             let analysis = try await analyzeWithRetry(
                                 email: candidate.parsed,
-                                profile: magpieProfile,
+                                profile: activeProfile,
                                 apiKey: apiKey,
                                 aiClient: aiClient
                             )
@@ -337,7 +366,7 @@ struct BatchSummarizeMain {
         var orderedResults = await state.orderedEntries(following: candidates)
         logLine("🎯 AI 总结阶段完成: 总计 \(orderedResults.count)/\(total) 封 (新分析 \(finalSnap.newlyAnalyzed), 缓存复用 \(finalSnap.reusedCache), 失败 \(finalSnap.failed))")
 
-        // (D) Auto-flag unflagged Moxa emails in Apple Mail (preserving any existing user flags)
+        // (D) Auto-flag unflagged emails in Apple Mail (preserving any existing user flags)
         var newlyFlaggedCount = 0
         if opts.applyFlags {
             newlyFlaggedCount = try applyMailFlagsIfNeeded(&orderedResults)
@@ -352,8 +381,8 @@ struct BatchSummarizeMain {
         if let reportPath = opts.reportJSONPath {
             let doc = BatchReportDocument(
                 generatedAtISO: ISO8601DateFormatter().string(from: Date()),
-                providerName: magpieProfile.name,
-                providerBaseURL: magpieProfile.normalizedBaseURL,
+                providerName: activeProfile.name,
+                providerBaseURL: activeProfile.normalizedBaseURL,
                 modelName: modelName,
                 targetCount: opts.limit,
                 collectedCount: candidates.count,
@@ -377,7 +406,7 @@ struct BatchSummarizeMain {
         }
     }
 
-    // MARK: - (A) Magpie Config & Keychain
+    // MARK: - (A) Provider Config & Keychain
 
     private static func findSharedAppGroupContainer() -> URL? {
         let groupContainersDir = URL(
@@ -391,28 +420,41 @@ struct BatchSummarizeMain {
         ) else {
             return nil
         }
-        return entries.first { url in
-            url.lastPathComponent.hasSuffix(".\(SharedAppGroup.groupSuffix)")
-        }
+        return entries.first(where: { $0.lastPathComponent.hasSuffix(".\(SharedAppGroup.groupSuffix)") })
+            ?? entries.first(where: { $0.lastPathComponent.hasSuffix(".\(SharedAppGroup.legacyGroupSuffix)") })
     }
 
-    private static func loadAndValidateMagpieConfig() throws -> (AIProviderProfile, String) {
+    private static func loadAndValidateProviderConfig(options: CLIOptions) throws -> (AIProviderProfile, String, PrimaryMailFilterScope) {
         var candidatePlists: [String] = []
-        if let groupURL = findSharedAppGroupContainer() {
-            let groupID = groupURL.lastPathComponent
-            let groupPlist = groupURL
-                .appendingPathComponent("Library", isDirectory: true)
-                .appendingPathComponent("Preferences", isDirectory: true)
-                .appendingPathComponent("\(groupID).plist", isDirectory: false)
-                .path
-            candidatePlists.append(groupPlist)
+        let groupContainersDir = URL(
+            fileURLWithPath: "\(NSHomeDirectory())/Library/Group Containers",
+            isDirectory: true
+        )
+        if let entries = try? FileManager.default.contentsOfDirectory(
+            at: groupContainersDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for suffix in [SharedAppGroup.groupSuffix, SharedAppGroup.legacyGroupSuffix] {
+                if let groupURL = entries.first(where: { $0.lastPathComponent.hasSuffix(".\(suffix)") }) {
+                    let groupID = groupURL.lastPathComponent
+                    candidatePlists.append(
+                        groupURL
+                            .appendingPathComponent("Library", isDirectory: true)
+                            .appendingPathComponent("Preferences", isDirectory: true)
+                            .appendingPathComponent("\(groupID).plist", isDirectory: false)
+                            .path
+                    )
+                }
+            }
         }
         candidatePlists.append(extensionPlistPath)
+        candidatePlists.append(legacyExtensionPlistPath)
 
         var lastError: Error?
         for plistPath in candidatePlists {
             do {
-                return try loadAndValidateMagpieConfig(fromPlistAt: plistPath)
+                return try loadAndValidateProviderConfig(fromPlistAt: plistPath, options: options)
             } catch {
                 lastError = error
             }
@@ -420,7 +462,10 @@ struct BatchSummarizeMain {
         throw lastError ?? BatchCLIError.missingConfigPlist(extensionPlistPath)
     }
 
-    private static func loadAndValidateMagpieConfig(fromPlistAt plistPath: String) throws -> (AIProviderProfile, String) {
+    private static func loadAndValidateProviderConfig(
+        fromPlistAt plistPath: String,
+        options: CLIOptions
+    ) throws -> (AIProviderProfile, String, PrimaryMailFilterScope) {
         let plistURL = URL(fileURLWithPath: plistPath)
         guard FileManager.default.fileExists(atPath: plistURL.path),
               let dict = NSDictionary(contentsOf: plistURL) as? [String: Any]
@@ -428,40 +473,61 @@ struct BatchSummarizeMain {
             throw BatchCLIError.missingConfigPlist(plistPath)
         }
 
-        guard let profilesData = dict[AIProviderStore.profilesDefaultsKey] as? Data,
+        let profilesData = (dict[AIProviderStore.profilesDefaultsKey] as? Data)
+            ?? (dict[AIProviderStore.legacyProfilesDefaultsKey] as? Data)
+        guard let profilesData,
               let profiles = try? JSONDecoder().decode([AIProviderProfile].self, from: profilesData),
               !profiles.isEmpty
         else {
-            throw BatchCLIError.missingMagpieProfile("无法解码 \(AIProviderStore.profilesDefaultsKey)")
+            throw BatchCLIError.missingProviderProfile("无法解码 \(AIProviderStore.profilesDefaultsKey)")
         }
 
-        let activeID = (dict[AIProviderStore.activeProfileIDDefaultsKey] as? String) ?? ""
-        let activeMatch = profiles.first(where: { $0.id == activeID })
-        let magpieMatch: AIProviderProfile?
-        if let active = activeMatch,
-           active.kind != .vertexAI && !active.baseURL.lowercased().contains("googleapis.com")
-        {
-            magpieMatch = active
+        let isVertexProfile: (AIProviderProfile) -> Bool = { profile in
+            profile.kind == .vertexAI || profile.baseURL.lowercased().contains("googleapis.com")
+        }
+
+        let selected: AIProviderProfile?
+        if let query = options.providerQuery?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty {
+            selected = profiles.first(where: { $0.id == query })
+                ?? profiles.first(where: { $0.name.localizedCaseInsensitiveContains(query) })
         } else {
-            magpieMatch = profiles.first {
-                $0.name.localizedCaseInsensitiveContains("Magpie") || $0.baseURL.contains("192.168.50.60:3425")
+            let activeID = (dict[AIProviderStore.activeProfileIDDefaultsKey] as? String)
+                ?? (dict[AIProviderStore.legacyActiveProfileIDDefaultsKey] as? String)
+                ?? ""
+            let activeMatch = profiles.first(where: { $0.id == activeID })
+            if let active = activeMatch, (options.allowVertex || !isVertexProfile(active)) {
+                selected = active
+            } else if !options.allowVertex {
+                selected = profiles.first(where: { !isVertexProfile($0) }) ?? activeMatch ?? profiles.first
+            } else {
+                selected = activeMatch ?? profiles.first
             }
         }
 
-        guard let profile = magpieMatch else {
-            throw BatchCLIError.missingMagpieProfile("profiles 中无 Magpie 节点")
+        guard let profile = selected else {
+            throw BatchCLIError.missingProviderProfile("未找到匹配的服务商配置")
         }
 
-        // Hard safety guard: strictly forbid Vertex AI
-        guard profile.kind != .vertexAI && !profile.baseURL.lowercased().contains("googleapis.com") else {
+        if !options.allowVertex && isVertexProfile(profile) {
             throw BatchCLIError.vertexForbidden("kind=\(profile.kind.rawValue), baseURL=\(profile.baseURL)")
         }
 
+        let filterScope: PrimaryMailFilterScope = {
+            guard let scopeData = dict[PrimaryMailFilter.scopeDefaultsKey] as? Data,
+                  let decoded = try? JSONDecoder().decode(PrimaryMailFilterScope.self, from: scopeData)
+            else {
+                return PrimaryMailFilterScope()
+            }
+            return decoded
+        }()
+
         let account = KeychainStore.accountName(forProfileID: profile.id)
-        if let cliKey = loadKeyViaSecurityCLI(service: KeychainStore.defaultService, account: account),
-           !cliKey.isEmpty
-        {
-            return (profile, cliKey)
+        for service in [KeychainStore.defaultService, KeychainStore.legacyService] {
+            if let cliKey = loadKeyViaSecurityCLI(service: service, account: account),
+               !cliKey.isEmpty
+            {
+                return (profile, cliKey, filterScope)
+            }
         }
 
         throw BatchCLIError.missingAPIKey("service=\(KeychainStore.defaultService), account=\(account)")
@@ -484,36 +550,64 @@ struct BatchSummarizeMain {
 
     // MARK: - (B) Read-Only EMLX Indexing & Envelope Index Filtering
 
-    private static func buildEmlxIndex(under rootDir: URL) -> [Int64: URL] {
-        var index: [Int64: (url: URL, isPartial: Bool)] = [:]
-        guard let enumerator = FileManager.default.enumerator(
-            at: rootDir,
-            includingPropertiesForKeys: [.isRegularFileKey],
+    private static func discoverMailAccountDirs(under root: URL, accountFilter: String?) -> [URL] {
+        guard let children = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
-            return [:]
+            return []
         }
 
-        for case let fileURL as URL in enumerator {
-            let name = fileURL.lastPathComponent
-            guard name.hasSuffix(".emlx") else { continue }
-            if name.hasSuffix(".partial.emlx") {
-                let rawID = String(name.dropLast(".partial.emlx".count))
-                if let rowID = Int64(rawID), index[rowID] == nil {
-                    index[rowID] = (fileURL, true)
-                }
-            } else {
-                let rawID = String(name.dropLast(".emlx".count))
-                if let rowID = Int64(rawID) {
-                    index[rowID] = (fileURL, false)
+        let filter = accountFilter?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return children.filter { url in
+            let name = url.lastPathComponent
+            guard name != "MailData" else { return false }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+                return false
+            }
+            if let filter, !filter.isEmpty {
+                return name.lowercased().contains(filter)
+            }
+            return true
+        }
+    }
+
+    private static func buildEmlxIndex(under accountDirs: [URL]) -> [Int64: URL] {
+        var index: [Int64: (url: URL, isPartial: Bool)] = [:]
+        for rootDir in accountDirs {
+            guard let enumerator = FileManager.default.enumerator(
+                at: rootDir,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            for case let fileURL as URL in enumerator {
+                let name = fileURL.lastPathComponent
+                guard name.hasSuffix(".emlx") else { continue }
+                if name.hasSuffix(".partial.emlx") {
+                    let rawID = String(name.dropLast(".partial.emlx".count))
+                    if let rowID = Int64(rawID), index[rowID] == nil {
+                        index[rowID] = (fileURL, true)
+                    }
+                } else {
+                    let rawID = String(name.dropLast(".emlx".count))
+                    if let rowID = Int64(rawID) {
+                        index[rowID] = (fileURL, false)
+                    }
                 }
             }
         }
         return index.mapValues(\.url)
     }
 
-    private static func collectValidMoxaCandidates(
+    private static func collectValidCandidates(
         limit: Int,
+        accountFilter: String?,
+        filterScope: PrimaryMailFilterScope,
         emlxIndex: [Int64: URL]
     ) throws -> ([CandidateEmail], [String: Int]) {
         var db: OpaquePointer?
@@ -526,21 +620,31 @@ struct BatchSummarizeMain {
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 5000)
 
+        let trimmedAccount = accountFilter?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let accountClause = trimmedAccount.isEmpty ? "" : "\n          AND mb.url LIKE ? ESCAPE '\\'"
+
         let sql = """
         SELECT m.ROWID, m.date_received, mb.url, m.flagged, COALESCE(m.flag_color, -1), COALESCE(s.subject, ''), COALESCE(a.address, '')
         FROM messages m
         JOIN mailboxes mb ON m.mailbox = mb.ROWID
         LEFT JOIN subjects s ON m.subject = s.ROWID
         LEFT JOIN addresses a ON m.sender = a.ROWID
-        WHERE m.deleted = 0
-          AND mb.url LIKE 'ews://E94D4074-9E81-4F1D-9310-9E94C36EDEA2/%'
+        WHERE m.deleted = 0\(accountClause)
           AND mb.url NOT LIKE '%/%E5%B7%B2%E5%8F%91%E9%80%81%'
+          AND mb.url NOT LIKE '%/Sent%'
           AND mb.url NOT LIKE '%/%E8%8D%89%E7%A8%BF%'
+          AND mb.url NOT LIKE '%/Drafts%'
           AND mb.url NOT LIKE '%/%E5%B7%B2%E5%88%A0%E9%99%A4%'
+          AND mb.url NOT LIKE '%/Trash%'
+          AND mb.url NOT LIKE '%/Deleted%'
           AND mb.url NOT LIKE '%/%E5%9E%83%E5%9C%BE%'
+          AND mb.url NOT LIKE '%/Junk%'
+          AND mb.url NOT LIKE '%/Spam%'
           AND mb.url NOT LIKE '%/%E6%97%A5%E5%8E%86%'
+          AND mb.url NOT LIKE '%/Calendar%'
           AND mb.url NOT LIKE '%/%E5%86%B2%E7%AA%81%'
           AND mb.url NOT LIKE '%/%E5%90%8C%E6%AD%A5%E9%97%AE%E9%A2%98%'
+          AND mb.url NOT LIKE '%/Sync%20Issues%'
           AND mb.url NOT LIKE '%/%E5%AF%B9%E8%AF%9D%E5%8E%86%E5%8F%B2%'
         ORDER BY m.date_received DESC
         LIMIT 3000;
@@ -552,8 +656,18 @@ struct BatchSummarizeMain {
         }
         defer { sqlite3_finalize(stmt) }
 
+        if !trimmedAccount.isEmpty {
+            let escaped = trimmedAccount
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            let pattern = "%\(escaped)%"
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            pattern.withCString { _ = sqlite3_bind_text(stmt, 1, $0, -1, transient) }
+        }
+
         let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.timeZone = TimeZone(identifier: "Asia/Shanghai") ?? .current
+        isoFormatter.timeZone = .current
 
         var candidates: [CandidateEmail] = []
         candidates.reserveCapacity(limit)
@@ -604,8 +718,8 @@ struct BatchSummarizeMain {
                 headers: headers
             )
 
-            // Pass now: msgDate to apply full Moxa Primary rules while preserving historical emails
-            if case let .skip(reason) = MoxaPrimaryFilter.evaluate(filterInput, now: msgDate) {
+            // Pass now: msgDate to apply Primary rules while preserving historical emails
+            if case let .skip(reason) = PrimaryMailFilter.evaluate(filterInput, scope: filterScope, now: msgDate) {
                 skipStats[reason.logDescription, default: 0] += 1
                 continue
             }
@@ -628,13 +742,14 @@ struct BatchSummarizeMain {
                 continue
             }
 
-            let mailboxName = decodedMailboxName(from: mailboxURL)
+            let (accountID, mailboxName) = parsedAccountAndMailboxName(from: mailboxURL)
             candidates.append(
                 CandidateEmail(
                     rowID: rowID,
                     dateReceivedUnix: dateUnix,
                     dateReceivedISO: isoFormatter.string(from: msgDate),
                     mailboxURL: mailboxURL,
+                    accountID: accountID,
                     mailboxName: mailboxName,
                     wasFlaggedInMail: flagged,
                     existingFlagColor: flagColor,
@@ -667,10 +782,17 @@ struct BatchSummarizeMain {
         return Data(fileData[bodyStart..<bodyEnd])
     }
 
-    private static func decodedMailboxName(from mailboxURL: String) -> String {
-        guard let range = mailboxURL.range(of: moxaAccountPrefix) else { return mailboxURL }
-        let rawSub = String(mailboxURL[range.upperBound...])
-        return rawSub.removingPercentEncoding ?? rawSub
+    private static func parsedAccountAndMailboxName(from mailboxURL: String) -> (accountID: String, mailboxName: String) {
+        guard let schemeSep = mailboxURL.range(of: "://") else {
+            return ("", mailboxURL.removingPercentEncoding ?? mailboxURL)
+        }
+        let afterScheme = mailboxURL[schemeSep.upperBound...]
+        guard let slashIdx = afterScheme.firstIndex(of: "/") else {
+            return (String(afterScheme), "")
+        }
+        let accountID = String(afterScheme[..<slashIdx])
+        let rawSub = String(afterScheme[afterScheme.index(after: slashIdx)...])
+        return (accountID, rawSub.removingPercentEncoding ?? rawSub)
     }
 
     private static func columnString(_ stmt: OpaquePointer, _ index: Int32) -> String {
@@ -736,6 +858,7 @@ struct BatchSummarizeMain {
             dateReceivedUnix: candidate.dateReceivedUnix,
             dateReceivedISO: candidate.dateReceivedISO,
             mailboxURL: candidate.mailboxURL,
+            accountID: candidate.accountID,
             mailboxName: candidate.mailboxName,
             subject: subj,
             from: sender,
@@ -754,6 +877,18 @@ struct BatchSummarizeMain {
 
     // MARK: - (D) Apple Mail 7-Color Auto-Flagging (Unflagged Only)
 
+    private struct MailboxGroupKey: Hashable, Comparable {
+        let accountID: String
+        let mailboxName: String
+
+        static func < (lhs: MailboxGroupKey, rhs: MailboxGroupKey) -> Bool {
+            if lhs.accountID != rhs.accountID {
+                return lhs.accountID < rhs.accountID
+            }
+            return lhs.mailboxName < rhs.mailboxName
+        }
+    }
+
     private static func mailFlagIndex(for category: MailFlagCategory) -> Int? {
         switch category {
         case .red: return 0
@@ -768,8 +903,8 @@ struct BatchSummarizeMain {
     }
 
     private static func applyMailFlagsIfNeeded(_ entries: inout [BatchEmailResult]) throws -> Int {
-        // Group indices in `entries` by mailboxName for fast batch index lookup inside each mailbox
-        var indicesByMailbox: [String: [Int]] = [:]
+        // Group indices in `entries` by (accountID, mailboxName) for fast batch index lookup
+        var indicesByMailbox: [MailboxGroupKey: [Int]] = [:]
         for idx in entries.indices {
             let entry = entries[idx]
             guard !entry.wasFlaggedInMail,
@@ -777,7 +912,8 @@ struct BatchSummarizeMain {
             else {
                 continue
             }
-            indicesByMailbox[entry.mailboxName, default: []].append(idx)
+            let key = MailboxGroupKey(accountID: entry.accountID, mailboxName: entry.mailboxName)
+            indicesByMailbox[key, default: []].append(idx)
         }
 
         guard !indicesByMailbox.isEmpty else {
@@ -790,7 +926,9 @@ struct BatchSummarizeMain {
 
         var totalFlagged = 0
 
-        for (mailboxName, entryIndices) in indicesByMailbox.sorted(by: { $0.key < $1.key }) {
+        for (groupKey, entryIndices) in indicesByMailbox.sorted(by: { $0.key < $1.key }) {
+            let accountID = groupKey.accountID
+            let mailboxName = groupKey.mailboxName
             let chunkSize = 15
             var doneInMailbox = 0
             var mailboxNewlyFlagged = 0
@@ -798,8 +936,8 @@ struct BatchSummarizeMain {
 
             for start in stride(from: 0, to: entryIndices.count, by: chunkSize) {
                 let entrySlice = Array(entryIndices[start..<min(start + chunkSize, entryIndices.count)])
-                // Refresh ordered ROWID mapping before every small chunk (2.2s even for 45k Archive)
-                let orderedIDs = try fetchOrderedMessageIDs(forMailbox: mailboxName)
+                // Refresh ordered ROWID mapping before every small chunk
+                let orderedIDs = try fetchOrderedMessageIDs(accountID: accountID, forMailbox: mailboxName)
                 var positionByRowID: [Int64: Int] = [:]
                 positionByRowID.reserveCapacity(orderedIDs.count)
                 for (offset, rowID) in orderedIDs.enumerated() {
@@ -822,7 +960,7 @@ struct BatchSummarizeMain {
 
                 let batchReport = chunkTargets.isEmpty
                     ? FlagBatchOutcome()
-                    : try executeFlagBatch(mailboxName: mailboxName, batch: chunkTargets)
+                    : try executeFlagBatch(accountID: accountID, mailboxName: mailboxName, batch: chunkTargets)
 
                 for item in chunkTargets where batchReport.okIDs.contains(item.rowID) {
                     entries[item.entryIndex].appliedFlagIndex = item.flagIndex
@@ -851,44 +989,68 @@ struct BatchSummarizeMain {
         var errors: [String] = []
     }
 
-    private static func appleScriptMailboxExpr(for mailboxName: String) -> String {
+    private static func appleScriptResolveAccountAndMailboxBlock(accountID: String, mailboxName: String) -> String {
+        let escapedAccountID = escapeAppleScriptString(accountID)
         let escapedFull = escapeAppleScriptString(mailboxName)
         let components = mailboxName.split(separator: "/").map(String.init)
-        if components.count <= 1 {
-            return "mailbox \"\(escapedFull)\" of acct"
-        }
-        // Try path literal first; fallback built into resolveTargetMailbox script
-        return "mailbox \"\(escapedFull)\" of acct"
-    }
-
-    private static func appleScriptResolveMailboxBlock(for mailboxName: String) -> String {
-        let escapedFull = escapeAppleScriptString(mailboxName)
-        let components = mailboxName.split(separator: "/").map(String.init)
-        var nested = "acct"
+        var nested = "candidateAcct"
         for comp in components {
             nested = "mailbox \"\(escapeAppleScriptString(comp))\" of (\(nested))"
         }
-        if components.count <= 1 {
+        let resolveInCandidate = components.count <= 1
+            ? "set targetMb to mailbox \"\(escapedFull)\" of candidateAcct"
+            : """
+            try
+                set targetMb to mailbox "\(escapedFull)" of candidateAcct
+            on error
+                set targetMb to \(nested)
+            end try
+            """
+
+        if !accountID.isEmpty {
             return """
-            set targetMb to mailbox "\(escapedFull)" of acct
+            set targetMb to missing value
+            repeat with candidateAcct in (every account)
+                if (id of candidateAcct as text) is "\(escapedAccountID)" then
+                    try
+                        \(resolveInCandidate)
+                        exit repeat
+                    end try
+                end if
+            end repeat
+            if targetMb is missing value then
+                repeat with candidateAcct in (every account)
+                    try
+                        \(resolveInCandidate)
+                        exit repeat
+                    end try
+                end repeat
+            end if
+            if targetMb is missing value then
+                error "Mailbox not found: \(escapedFull)"
+            end if
             """
         }
+
         return """
         set targetMb to missing value
-        try
-            set targetMb to mailbox "\(escapedFull)" of acct
-        on error
-            set targetMb to \(nested)
-        end try
+        repeat with candidateAcct in (every account)
+            try
+                \(resolveInCandidate)
+                exit repeat
+            end try
+        end repeat
+        if targetMb is missing value then
+            error "Mailbox not found: \(escapedFull)"
+        end if
         """
     }
 
-    private static func fetchOrderedMessageIDs(forMailbox mailboxName: String) throws -> [Int64] {
+    private static func fetchOrderedMessageIDs(accountID: String, forMailbox mailboxName: String) throws -> [Int64] {
         let script = """
         with timeout of 120 seconds
             tell application "Mail"
-                set acct to account "公司邮箱"
-                \(appleScriptResolveMailboxBlock(for: mailboxName))
+                \(appleScriptResolveAccountAndMailboxBlock(accountID: accountID, mailboxName: mailboxName))
                 set idList to id of every message of targetMb
                 set AppleScript's text item delimiters to ","
                 set joinedText to idList as text
@@ -904,6 +1066,7 @@ struct BatchSummarizeMain {
     }
 
     private static func executeFlagBatch(
+        accountID: String,
         mailboxName: String,
         batch: [(entryIndex: Int, position: Int, rowID: Int64, flagIndex: Int, flagName: String)]
     ) throws -> FlagBatchOutcome {
@@ -952,8 +1115,7 @@ struct BatchSummarizeMain {
         let script = """
         with timeout of 300 seconds
             tell application "Mail"
-                set acct to account "公司邮箱"
-                \(appleScriptResolveMailboxBlock(for: mailboxName))
+                \(appleScriptResolveAccountAndMailboxBlock(accountID: accountID, mailboxName: mailboxName))
                 set outLines to {}
                 \(perItemLines.joined(separator: "\n                "))
                 set AppleScript's text item delimiters to linefeed

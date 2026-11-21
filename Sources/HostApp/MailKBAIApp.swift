@@ -1,9 +1,9 @@
 import SwiftUI
 
 @main
-struct AppleMailAIApp: App {
+struct MailKBAIApp: App {
     var body: some Scene {
-        WindowGroup("Apple Mail AI 助手") {
+        WindowGroup("MailKB AI") {
             HostDashboardView()
                 .frame(minWidth: 920, minHeight: 620)
         }

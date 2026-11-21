@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUNDLE_ID="com.bao3.AppleMailAI.Extension"
-SERVICE="com.bao3.AppleMailAI.vertex-api-key"
+BUNDLE_ID="com.bao3.MailKBAI.Extension"
+LEGACY_BUNDLE_ID="com.bao3.AppleMailAI.Extension"
+SERVICE="com.bao3.MailKBAI.vertex-api-key"
+LEGACY_SERVICE="com.bao3.AppleMailAI.vertex-api-key"
 ACCOUNT="vertex-api-key"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
-APP_PATH="$INSTALL_DIR/AppleMailAI.app"
-APPEX_PATH="$APP_PATH/Contents/PlugIns/MailAIExtension.appex"
+APP_PATH="$INSTALL_DIR/MailKBAI.app"
+APPEX_PATH="$APP_PATH/Contents/PlugIns/MailKBAIExtension.appex"
 
 section() {
   printf "\n============================================================\n"
@@ -17,7 +19,7 @@ section() {
 section "1. System & Mail.app Environment"
 sw_vers || true
 defaults read /System/Applications/Mail.app/Contents/Info CFBundleShortVersionString 2>/dev/null | sed 's/^/Mail.app Version: /' || true
-pgrep -fl "MailAIExtension|AppleMailAI" || echo "(No MailAIExtension / AppleMailAI process currently running)"
+pgrep -fl "MailKBAIExtension|MailKBAI" || echo "(No MailKBAIExtension / MailKBAI process currently running)"
 
 section "2. Installed App & Extension Bundle Check"
 if [[ -d "$APP_PATH" ]]; then
@@ -76,14 +78,22 @@ else
   echo "⚠️  Extension is NOT enabled (+) yet. Enable it in: Mail → Settings → Extensions."
 fi
 
+LEGACY_PK_OUT="$(pluginkit -m -v -A -D -i "$LEGACY_BUNDLE_ID" 2>&1 || true)"
+LEGACY_REG_COUNT="$(printf "%s\n" "$LEGACY_PK_OUT" | grep -c "$LEGACY_BUNDLE_ID" || true)"
+if [[ "$LEGACY_REG_COUNT" -gt 0 ]]; then
+  echo "⚠️  Legacy $LEGACY_BUNDLE_ID is still registered in PlugInKit ($LEGACY_REG_COUNT copies). Run: make reset-pluginkit"
+fi
+
 section "5. Keychain Credential Check (Non-Secret)"
 if security find-generic-password -s "$SERVICE" -a "$ACCOUNT" >/dev/null 2>&1; then
   echo "✅ Keychain item exists (service=$SERVICE, account=$ACCOUNT)"
+elif security find-generic-password -s "$LEGACY_SERVICE" -a "$ACCOUNT" >/dev/null 2>&1; then
+  echo "ℹ️  Legacy Keychain item exists (service=$LEGACY_SERVICE, account=$ACCOUNT; automatic fallback active)"
 else
   echo "⚠️  Keychain item NOT found. Run: make provision-key"
 fi
 
-section "6. Recent Crash Reports (Mail & MailAIExtension)"
+section "6. Recent Crash Reports (Mail & MailKBAIExtension)"
 CRASH_FOUND=0
 for dir in "$HOME/Library/Logs/DiagnosticReports" "/Library/Logs/DiagnosticReports"; do
   if [[ -d "$dir" ]]; then
@@ -119,15 +129,15 @@ if len(lines) >= 2 and lines[0].startswith("{"):
 else:
     print("\n".join(lines[:30]))
 PY
-    done < <(find "$dir" -maxdepth 2 \( -name "Mail-*.ips" -o -name "MailAIExtension-*.ips" -o -name "AppleMailAI-*.ips" \) -mtime -7 2>/dev/null | sort -r | head -n 5)
+    done < <(find "$dir" -maxdepth 2 \( -name "Mail-*.ips" -o -name "MailKBAIExtension-*.ips" -o -name "MailKBAI-*.ips" \) -mtime -7 2>/dev/null | sort -r | head -n 5)
   fi
 done
 if [[ "$CRASH_FOUND" -eq 0 ]]; then
-  echo "✅ No recent Mail / MailAIExtension .ips crash reports found in the last 7 days."
+  echo "✅ No recent Mail / MailKBAIExtension .ips crash reports found in the last 7 days."
 fi
 
 section "7. Recent Unified Logs (Last 10 Minutes)"
-log show --last 10m --style compact --predicate 'subsystem == "com.bao3.AppleMailAI" OR process == "MailAIExtension"' 2>/dev/null | tail -n 40 || true
+log show --last 10m --style compact --predicate 'subsystem == "com.bao3.MailKBAI" OR process == "MailKBAIExtension"' 2>/dev/null | tail -n 40 || true
 
 echo ""
 echo "Tip: Stream live logs while reproducing with: make logs"

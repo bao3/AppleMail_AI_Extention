@@ -8,8 +8,9 @@ cd "$REPO_ROOT"
 echo "==> [1/5] Pulling latest main..."
 git pull --ff-only origin main
 
-echo "==> [2/5] Quitting Apple Mail & AppleMailAI..."
+echo "==> [2/5] Quitting Apple Mail & MailKBAI..."
 osascript -e 'tell application "Mail" to quit' >/dev/null 2>&1 || true
+osascript -e 'tell application "MailKBAI" to quit' >/dev/null 2>&1 || true
 osascript -e 'tell application "AppleMailAI" to quit' >/dev/null 2>&1 || true
 sleep 1
 

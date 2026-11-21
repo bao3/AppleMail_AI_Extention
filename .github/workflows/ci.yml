@@ -27,11 +27,11 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build AppleMailAI & MailAIExtension (unsigned CI check)
+      - name: Build MailKBAI & MailKBAIExtension (unsigned CI check)
         run: |
           xcodebuild \
-            -project AppleMailAI.xcodeproj \
-            -scheme AppleMailAI \
+            -project MailKBAI.xcodeproj \
+            -scheme MailKBAI \
             -configuration Release \
             -derivedDataPath build/DerivedData \
             CODE_SIGNING_ALLOWED=NO \
@@ -42,17 +42,17 @@ jobs:
 
       - name: Verify Extension bundle Info.plist & Assets.car
         run: |
-          APPEX="build/DerivedData/Build/Products/Release/AppleMailAI.app/Contents/PlugIns/MailAIExtension.appex"
+          APPEX="build/DerivedData/Build/Products/Release/MailKBAI.app/Contents/PlugIns/MailKBAIExtension.appex"
           test -d "$APPEX"
           /usr/libexec/PlistBuddy -c "Print :NSExtension" "$APPEX/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionAttributes:MEComposeSession:MEComposeIcon" "$APPEX/Contents/Info.plist"
           test -f "$APPEX/Contents/Resources/Assets.car"
-          echo "Verified MailAIExtension.appex bundle and Assets.car successfully."
+          echo "Verified MailKBAIExtension.appex bundle and Assets.car successfully."
 
-      - name: Run unit tests (AppleMailAITests)
+      - name: Run unit tests (MailKBAITests)
         run: |
           xcodebuild \
-            -project AppleMailAI.xcodeproj \
-            -scheme AppleMailAITests \
+            -project MailKBAI.xcodeproj \
+            -scheme MailKBAITests \
             -derivedDataPath build/DerivedData \
             test
